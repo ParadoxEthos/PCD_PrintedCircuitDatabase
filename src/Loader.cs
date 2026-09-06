@@ -1,0 +1,93 @@
+using System;
+using System.IO;
+using System.Reflection;
+using System.Runtime.Loader;
+using Autodesk.AutoCAD.Runtime;
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using AcAp = Autodesk.AutoCAD.ApplicationServices.Application;
+
+[assembly: CommandClass(typeof(PCD.Loader))]
+
+namespace PCD
+{
+    /// <summary>
+    /// Stable shim NETLOADed ONCE. The PCD command hot-loads the sibling PCD.Core.dll into a
+    /// fresh collectible AssemblyLoadContext, invokes PCD.Demo.Build, then unloads — so the
+    /// geometry code can be rebuilt and re-run without restarting AutoCAD or re-NETLOADing.
+    /// Core is read into memory (FileShare.ReadWrite) so its file is never locked between runs.
+    /// </summary>
+    public class Loader
+    {
+        private static string CorePath()
+        {
+            string dir = Path.GetDirectoryName(typeof(Loader).Assembly.Location);
+            return Path.Combine(dir, "PCD.Core.dll");
+        }
+
+        /// <summary>Load probe.</summary>
+        [CommandMethod("PCDPING")]
+        public void Ping()
+        {
+            Document doc = AcAp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            doc.Editor.WriteMessage("\nPCD.Loader " + typeof(Loader).Assembly.GetName().Version +
+                                    " ready. Core -> " + CorePath() + "\n");
+        }
+
+        /// <summary>Hot-load PCD.Core and build the board (rebuildable without restart).</summary>
+        [CommandMethod("PCD")]
+        public void Run()
+        {
+            Document doc = AcAp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+            string path = CorePath();
+            if (!File.Exists(path)) { ed.WriteMessage("\nPCD.Core.dll not found: " + path + "\n"); return; }
+
+            var alc = new AssemblyLoadContext("pcdcore", isCollectible: true);
+            try
+            {
+                Assembly asm;
+                // Read bytes (share read/write) so rebuilds can overwrite the file freely.
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    asm = alc.LoadFromStream(fs);
+
+                Type demo = asm.GetType("PCD.Demo");
+                MethodInfo build = demo?.GetMethod("Build", new[] { typeof(Database), typeof(Transaction) });
+                if (build == null) { ed.WriteMessage("\nPCD.Core: PCD.Demo.Build(Database,Transaction) not found.\n"); return; }
+
+                using (doc.LockDocument())
+                using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    build.Invoke(null, new object[] { doc.Database, tr });
+                    tr.Commit();
+                }
+                ed.WriteMessage("\nPCD core " + asm.GetName().Version + " built.\n");
+            }
+            catch (TargetInvocationException tie)
+            {
+                ed.WriteMessage("\nPCD build error: " + (tie.InnerException?.Message ?? tie.Message) + "\n");
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nPCD error: " + ex.Message + "\n");
+            }
+            finally
+            {
+                alc.Unload();
+            }
+        }
+
+        /// <summary>Frames the board: SW isometric, zoom extents, realistic shading.</summary>
+        [CommandMethod("PCDVIEW")]
+        public void View()
+        {
+            Document doc = AcAp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            // VPOINT Rotate (angle form) is what actually takes here; the coordinate form and
+            // .NET SetCurrentView both failed. 235deg in XY + 35.264deg up = isometric.
+            doc.SendStringToExecute("_.VPOINT\n_R\n235\n35.264\n_.ZOOM\n_E\n_.VSCURRENT\n_R\n", true, false, false);
+        }
+    }
+}
