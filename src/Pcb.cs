@@ -254,6 +254,30 @@ namespace PCD
             return s;
         }
 
+        /// <summary>Solid sphere centered at <paramref name="center"/> (LED domes, ball features).</summary>
+        public Solid3d Sphere(double radius, Point3d center, string layer, AcColor color)
+        {
+            var s = new Solid3d();
+            s.CreateSphere(radius);
+            s.TransformBy(Matrix3d.Displacement(center - Point3d.Origin));
+            Place(s, layer, color);
+            return s;
+        }
+
+        /// <summary>Vertical frustum/cone: bottom radius <paramref name="baseR"/>, top radius
+        /// <paramref name="topR"/> (0 = full cone). <paramref name="baseCenter"/> is the base.
+        /// Used for TO-can transistor bodies, tapered LEDs, standoffs.</summary>
+        public Solid3d Cone(double baseR, double topR, double height, Point3d baseCenter,
+                            string layer, AcColor color)
+        {
+            var s = new Solid3d();
+            s.CreateFrustum(height, baseR, baseR, Math.Max(1e-4, topR));   // ellipse base (baseR,baseR) -> circular top topR
+            var c = new Point3d(baseCenter.X, baseCenter.Y, baseCenter.Z + height / 2.0);
+            s.TransformBy(Matrix3d.Displacement(c - Point3d.Origin));
+            Place(s, layer, color);
+            return s;
+        }
+
         /// <summary>
         /// Single-line text. <paramref name="normal"/> orients the text plane:
         /// (0,0,1) = flat silkscreen on the board; (0,1,0) = upright glyph in a

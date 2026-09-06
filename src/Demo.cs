@@ -40,6 +40,15 @@ namespace PCD
         private static readonly AcColor Generic   = AcColor.FromRgb(150, 120, 170);
         private static readonly AcColor OpaqueBk  = AcColor.FromRgb(8, 8, 10);        // ACIS black-box
         private static readonly AcColor KataRed   = AcColor.FromRgb(232, 66, 66);     // opaque katakana
+        // ---- extended package palette ----
+        private static readonly AcColor DiodeBk   = AcColor.FromRgb(26, 26, 32);      // diode/transistor molded body
+        private static readonly AcColor CanSilver = AcColor.FromRgb(198, 200, 205);   // metal can (crystal, TO, osc)
+        private static readonly AcColor RelayBlue = AcColor.FromRgb(38, 66, 150);     // relay / large module case
+        private static readonly AcColor PotBody   = AcColor.FromRgb(28, 56, 140);     // potentiometer body
+        private static readonly AcColor Plastic   = AcColor.FromRgb(24, 24, 28);      // connector plastic base
+        private static readonly AcColor[] LedLens = {                                 // LED lens tints (picked by handle)
+            AcColor.FromRgb(235, 60, 55), AcColor.FromRgb(70, 220, 90),
+            AcColor.FromRgb(70, 130, 255), AcColor.FromRgb(255, 176, 40), AcColor.FromRgb(240, 240, 245) };
 
         private const string LBoard = "PCD-BOARD", LSilk = "PCD-SILK", LData = "PCD-DATA";
         private const string LIc = "PCD-IC", LPart = "PCD-PART", LVia = "PCD-VIA";
@@ -64,6 +73,10 @@ namespace PCD
         // three unrelated buffers summing to 3 read as a core and hard-blocked cells nobody occupied,
         // which closed corridors early and starved later nets (measured: 118 of 450 edges routed).
         private const int CoreMark = 50;
+        // Entity-band hardware (the drawing's entities: passives, LEDs, connectors, ACIS boxes) is drawn
+        // at this fraction of its nominal package size, so it reads as the small discrete parts a real
+        // board carries relative to its ICs. Chips (tables/records/CPU) are not scaled.
+        private const double EntityScale = 0.62;
 
         private static readonly Vector3d Up = new Vector3d(0, 0, 1);
         private static readonly Vector3d FaceY = new Vector3d(0, 1, 0);
@@ -120,7 +133,7 @@ namespace PCD
                 else if (p.Kind == Kind.Opaque)
                 {
                     // merged ACIS chip: keep the bbox-derived size (relative to the object), light jitter only
-                    p.Vw = w * RR(0.97, 1.03); p.Vd = d * RR(0.97, 1.03); p.Vz = z;
+                    p.Vw = w * EntityScale * RR(0.97, 1.03); p.Vd = d * EntityScale * RR(0.97, 1.03); p.Vz = z * EntityScale;
                     p.Variant = (int)(Rnd() % 3);
                 }
                 else
@@ -128,7 +141,8 @@ namespace PCD
                     // DATA-DRIVEN size: the entity's real magnitude (radius/length/height) sets the
                     // package scale -- a big circle is a big cap, a short line a small resistor.
                     double s = p.Mag > 0 ? Math.Min(2.0, 0.72 + 0.55 * Math.Log10(1 + p.Mag)) : RR(0.8, 1.2);
-                    p.Vw = w * s * RR(0.9, 1.12); p.Vd = d * s * RR(0.9, 1.12); p.Vz = z * s * RR(0.75, 1.3);
+                    double es = s * EntityScale;   // magnitude scale x the global entity shrink
+                    p.Vw = w * es * RR(0.9, 1.12); p.Vd = d * es * RR(0.9, 1.12); p.Vz = z * es * RR(0.75, 1.3);
                     p.Variant = (int)(Rnd() % 3);      // package sub-shape
                     if (R01() < 0.55) { double t = p.Vw; p.Vw = p.Vd; p.Vd = t; p.Rot = 1; }
                 }
@@ -142,7 +156,8 @@ namespace PCD
             (byte)Clamp(c.Green + (int)RR(-amt, amt)),
             (byte)Clamp(c.Blue + (int)RR(-amt, amt)));
 
-        private enum Kind { Die, Table, Record, Nod, Resistor, Capacitor, Inductor, TextPart, Array, Socket, TestPad, Opaque, Generic }
+        private enum Kind { Die, Table, Record, Nod, Resistor, Capacitor, Inductor, TextPart, Array, Socket, TestPad, Opaque, Generic,
+            Diode, Led, Transistor, Crystal, Connector, Relay, Dip, Pot }
         private enum ECls { Own, Layer, Block, Ltype, Style, Dim, App, Bad }
         private sealed class Part
         {
@@ -266,7 +281,7 @@ namespace PCD
             int msIdx = blockMap.TryGetValue("*Model_Space", out var _ms) ? _ms : die;
             var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
             var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
-            int r = 0, c = 0, l = 0, t = 0, j = 0, tp = 0, g = 0;
+            int r = 0, c = 0, l = 0, t = 0, j = 0, tp = 0, g = 0, dd = 0, q = 0, y = 0, kk = 0, u = 0, rv = 0;
             // ACIS b-reps are collected, then MERGED by touching bounding box into one chip
             // per physical part (a sheet-metal part is one chip, not 30 region boxes).
             var acis = new List<AcisBox>();
@@ -284,27 +299,30 @@ namespace PCD
                     Num(62, "color ACI", e.ColorIndex), Rl(48, "lt scale", e.LinetypeScale),
                 };
                 Kind k; double mag = 0;
+                // sub-variety WITHIN a DXF family is picked by the entity's own handle (reproducible,
+                // data-derived): one DXF type -> a family of realistic packages, so the board reads varied.
+                long hh = 0; try { hh = e.Handle.Value; } catch { } hh = Math.Abs(hh);
                 switch (e)
                 {
                     case Line ln:
                         rows.Add(Pt(10, "start pt", ln.StartPoint.X, ln.StartPoint.Y, ln.StartPoint.Z));
                         rows.Add(Pt(11, "end pt", ln.EndPoint.X, ln.EndPoint.Y, ln.EndPoint.Z));
                         rows.Add(Pt(210, "normal", ln.Normal.X, ln.Normal.Y, ln.Normal.Z));
-                        mag = ln.Length; k = Kind.Resistor; break;
+                        mag = ln.Length; k = (hh % 3 == 0) ? Kind.Diode : Kind.Resistor; break;
                     case Arc a:
                         rows.Add(Rl(40, "radius", a.Radius)); rows.Add(Rl(50, "start ang", Deg(a.StartAngle)));
                         rows.Add(Rl(51, "end ang", Deg(a.EndAngle)));
                         rows.Add(Pt(10, "center", a.Center.X, a.Center.Y, a.Center.Z));
-                        mag = a.Radius; k = Kind.Inductor; break;
+                        mag = a.Radius; k = (hh % 3 == 0) ? Kind.Crystal : Kind.Inductor; break;
                     case Circle ci:
                         rows.Add(Rl(40, "radius", ci.Radius));
                         rows.Add(Pt(10, "center", ci.Center.X, ci.Center.Y, ci.Center.Z));
                         rows.Add(Pt(210, "normal", ci.Normal.X, ci.Normal.Y, ci.Normal.Z));
-                        mag = ci.Radius; k = Kind.Capacitor; break;
+                        mag = ci.Radius; k = (hh % 4) switch { 0 => Kind.Led, 1 => Kind.Transistor, 2 => Kind.Pot, _ => Kind.Capacitor }; break;
                     case Ellipse el:
                         rows.Add(Rl(40, "major", el.MajorRadius)); rows.Add(Rl(41, "ratio", el.RadiusRatio));
                         rows.Add(Pt(10, "center", el.Center.X, el.Center.Y, el.Center.Z));
-                        mag = el.MajorRadius; k = Kind.Capacitor; break;
+                        mag = el.MajorRadius; k = (hh % 2 == 0) ? Kind.Crystal : Kind.Capacitor; break;
                     case DBText dt:
                         rows.Add(Rl(40, "height", dt.Height));
                         rows.Add(Pt(10, "position", dt.Position.X, dt.Position.Y, dt.Position.Z));
@@ -318,10 +336,11 @@ namespace PCD
                     case Polyline pl:
                         rows.Add(Num(90, "vertex count", pl.NumberOfVertices)); rows.Add(Rl(38, "elevation", pl.Elevation));
                         rows.Add(Num(70, "flags", pl.Closed ? 1 : 0));
-                        try { mag = pl.Length; } catch { } k = Kind.Array; break;
+                        try { mag = pl.Length; } catch { } k = pl.Closed ? ((hh % 2 == 0) ? Kind.Dip : Kind.Connector) : Kind.Array; break;
                     case BlockReference br:
                         rows.Add(Txt(2, "name", br.Name)); rows.Add(Pt(10, "insert pt", br.Position.X, br.Position.Y, br.Position.Z));
-                        rows.Add(Rl(50, "rotation", Deg(br.Rotation))); k = Kind.Socket; break;
+                        rows.Add(Rl(50, "rotation", Deg(br.Rotation)));
+                        k = (hh % 3) switch { 0 => Kind.Relay, 1 => Kind.Connector, _ => Kind.Socket }; break;
                     case DBPoint dp:
                         rows.Add(Pt(10, "position", dp.Position.X, dp.Position.Y, dp.Position.Z)); k = Kind.TestPad; break;
                     case Solid3d _:
@@ -342,6 +361,9 @@ namespace PCD
                     RefDes = k switch { Kind.Resistor => "R" + (++r), Kind.Capacitor => "C" + (++c),
                         Kind.Inductor => "L" + (++l), Kind.TextPart => "T" + (++t), Kind.Socket => "J" + (++j),
                         Kind.TestPad => "TP" + (++tp), Kind.Array => "RN" + (++t), Kind.Opaque => "M" + (++g),
+                        Kind.Diode => "D" + (++dd), Kind.Led => "D" + (++dd), Kind.Transistor => "Q" + (++q),
+                        Kind.Crystal => "Y" + (++y), Kind.Connector => "J" + (++j), Kind.Relay => "K" + (++kk),
+                        Kind.Dip => "U" + (++u), Kind.Pot => "RV" + (++rv),
                         _ => "X" + (++g) } });
 
                 // OWNERSHIP edge (the routed copper): the entity belongs to *Model_Space.
@@ -554,7 +576,7 @@ namespace PCD
                         double spread = depth[i] == 2 ? 0.55 : 0.45;
                         ang[i] = ang[parent[i]] + RR(-spread, spread); done[i] = true;
                     }
-            double[] baseR = { 0, 62, 108, 150 };
+            double[] baseR = { 0, 46, 80, 110 };   // compacted (~0.73x): same tree seeding, tighter rings
             for (int i = 0; i < n; i++)
             {
                 if (i == cpu) continue;
@@ -564,7 +586,7 @@ namespace PCD
             }
 
             // relax: spring toward parent + push rectangles apart + keep clear of the hub
-            const double clear = 10.0;   // extra leeway between parts (room for routing)
+            const double clear = 6.5;    // extra leeway between parts (room for routing; ~3.8 router cells)
             void PushApart(double gap)
             {
                 for (int i = 0; i < n; i++)
@@ -588,7 +610,7 @@ namespace PCD
                     if (i == cpu || parent[i] < 0) continue;
                     var a = parts[i]; var pp = parts[parent[i]];
                     double dx = pp.Cx - a.Cx, dy = pp.Cy - a.Cy, d = Math.Sqrt(dx * dx + dy * dy) + 1e-9;
-                    double want = (depth[i] == 1 ? 66 : depth[i] == 2 ? 52 : 40) + (a.Vw + pp.Vw) * 0.3;
+                    double want = (depth[i] == 1 ? 48 : depth[i] == 2 ? 38 : 28) + (a.Vw + pp.Vw) * 0.3;   // compacted springs
                     double f = (d - want) * 0.06;
                     a.Cx += dx / d * f; a.Cy += dy / d * f;
                 }
@@ -600,7 +622,7 @@ namespace PCD
                         if (i == cpu) continue;
                         var a = parts[i];
                         double dx = a.Cx - h.Cx, dy = a.Cy - h.Cy, d = Math.Sqrt(dx * dx + dy * dy) + 1e-9;
-                        double min = Math.Max(h.Vw, h.Vd) / 2 + Math.Max(a.Vw, a.Vd) / 2 + 20;
+                        double min = Math.Max(h.Vw, h.Vd) / 2 + Math.Max(a.Vw, a.Vd) / 2 + 14;   // compacted hub keep-out
                         if (d < min) { a.Cx += dx / d * (min - d); a.Cy += dy / d * (min - d); }
                     }
                 }
@@ -904,7 +926,7 @@ namespace PCD
                 minX = Math.Min(minX, p.Cx - p.Vw / 2); maxX = Math.Max(maxX, p.Cx + p.Vw / 2);
                 minY = Math.Min(minY, p.Cy - p.Vd / 2 - 4); maxY = Math.Max(maxY, p.Cy + p.Vd / 2 + 4);
             }
-            double pad = 24;   // margin ring: where the outline bites/notches live
+            double pad = 17;   // margin ring (compacted)
             double boardW = (maxX - minX) + 2 * pad;
 
             // PART DATA now prints ON each part's own body (PlacePart -> Pod), including
@@ -930,12 +952,12 @@ namespace PCD
             try { WriteDsn(parts, edges, poly, @"pcd.dsn"); } catch { }   // study dump
 
             // ---- grid MAZE ROUTER: every trace stays on TOP and routes AROUND chip footprints ----
-            const double cs = 1.7;   // finer routing grid -> smoother 45deg paths, fewer false blocks
+            const double cs = 0.6;   // routing grid: fine enough for the compacted layout's 3 giant reference nets (measured: 1.2 starved them, 0.8 left 58 dropped)
             int gw = (int)(boardW / cs) + 3, gh = (int)(boardH / cs) + 3;
             var blk = new bool[gw, gh];
             foreach (var p in parts)   // EVERY part is hardware: nothing routes under it on the TOP layer
             {
-                const double m = 0.6;   // tighter keep-out -> more top-layer gaps -> short nets stay on top (fewer vias)
+                double m = KeepOut(p);   // the COURTYARD: body + silkscreen ring (encloses corner pads and leads)
                 int x0 = Cl((int)((p.Cx - p.Vw / 2 - m) / cs), 0, gw - 1), x1 = Cl((int)((p.Cx + p.Vw / 2 + m) / cs), 0, gw - 1);
                 int y0 = Cl((int)((p.Cy - p.Vd / 2 - m) / cs), 0, gh - 1), y1 = Cl((int)((p.Cy + p.Vd / 2 + m) / cs), 0, gh - 1);
                 for (int gx = x0; gx <= x1; gx++) for (int gy = y0; gy <= y1; gy++) blk[gx, gy] = true;
@@ -943,6 +965,13 @@ namespace PCD
             for (int gx = 0; gx < gw; gx++) for (int gy = 0; gy < gh; gy++)          // nothing routes off the board
                 if (!PointInPoly(poly, (gx + 0.5) * cs, (gy + 0.5) * cs)) blk[gx, gy] = true;
             var used = new int[gw, gh];   // occupancy: traces avoid cells already used -> parallel lanes
+            foreach (var p in parts)      // refdes silkscreen: a SOFT cost (real DRC allows silk over masked traces,
+            {                             // not over pads) -- routed around when cheap, crossed when the corridor needs it.
+                var lb = LabelBox(p); if (lb == null) continue;   // (hard-blocking labels was measured to cost 82 reference pins)
+                int lx0 = Cl((int)(lb[0] / cs), 0, gw - 1), lx1 = Cl((int)(lb[2] / cs), 0, gw - 1);
+                int ly0 = Cl((int)(lb[1] / cs), 0, gh - 1), ly1 = Cl((int)(lb[3] / cs), 0, gh - 1);
+                for (int gx = lx0; gx <= lx1; gx++) for (int gy = ly0; gy <= ly1; gy++) used[gx, gy] += 2;
+            }
 
             // ---- every relationship is a routed net. Nets INTO the same chip merge into one tree
             //      (first source routes to the chip, later sources join the nearest point of that
@@ -1093,74 +1122,143 @@ namespace PCD
             for (int i = 0; i < edges.Count; i++)
             { var k = (edges[i].B, edges[i].Cls); if (!netKey.TryGetValue(k, out var l)) netKey[k] = l = new List<int>(); l.Add(i); }
             var netOrder = new List<(int dest, ECls cls)>(netKey.Keys);
-            netOrder.Sort((a, c) => {   // ownership nets first (the copper); then the biggest trees (they define the trunks)
+            netOrder.Sort((a, c) => {   // ownership nets first (the copper), biggest trees first (they define the trunks);
                 int r = (a.cls != ECls.Own).CompareTo(c.cls != ECls.Own); if (r != 0) return r;
-                return netKey[c].Count.CompareTo(netKey[a].Count); });
+                return a.cls == ECls.Own ? netKey[c].Count.CompareTo(netKey[a].Count)
+                                         : netKey[a].Count.CompareTo(netKey[c].Count); });   // references SMALLEST first: a
+                                         // one-target net is fragile and must claim corridors before big trees that can join anywhere
+            // LAYER ASSIGNMENT for the giant reference nets (the ones touching nearly every entity): largest
+            // prefers inner plane 1, second plane 2, third plane 1 -- spreading them across planes instead of
+            // all three competing for the same corridors (measured: they held every remaining dropped pin).
+            var giantPref = new Dictionary<(int dest, ECls cls), int>();
+            {
+                var refs = new List<(int dest, ECls cls)>(); foreach (var k in netOrder) if (k.cls != ECls.Own) refs.Add(k);
+                refs.Sort((a, c) => netKey[c].Count.CompareTo(netKey[a].Count));
+                int[] planes = { 1, 2, 1 }; for (int i = 0; i < refs.Count && i < 3; i++) giantPref[refs[i]] = planes[i];
+            }
             // PIN SLOTS: a part with k nets gets k distinct pins spread along its perimeter (distinct grid cells)
             var pinTotal = new int[parts.Count]; var pinNext = new int[parts.Count];
             foreach (var kv in netKey) { pinTotal[kv.Key.dest]++; foreach (int ei in kv.Value) pinTotal[edges[ei].A]++; }
-            const double pinPitch = 2.4;   // >= cs*sqrt(2): neighbouring pins land in different cells
+            const double pinPitch = 0.9;   // >= cs*sqrt(2): neighbouring pins land in different cells
             Point3d PinPos(Part p, double tx, double ty)
             {
                 var bp = PadPos(p, tx, ty);
                 int k = pinTotal[p.Idx], s = pinNext[p.Idx]++;
-                double off = (s - (k - 1) / 2.0) * pinPitch;
-                double hw = p.Vw / 2 + 1.3, hd = p.Vd / 2 + 1.3;
-                bool vert = Math.Abs(Math.Abs(bp.X - p.Cx) - hw) < 1e-6;   // pad sits on a vertical side -> slide along y
-                double x = bp.X, y = bp.Y;
-                if (vert) y = Math.Max(p.Cy - hd, Math.Min(p.Cy + hd, y + off)); else x = Math.Max(p.Cx - hw, Math.Min(p.Cx + hw, x + off));
+                double ko = KeepOut(p) + 0.35;
+                double hw = p.Vw / 2 + ko, hd = p.Vd / 2 + ko;   // same courtyard-edge offset as PadPos
+                double W = 2 * hw, H = 2 * hd, per = 2 * (W + H);
+                // Pins WALK THE WHOLE PERIMETER (arc length, CCW from the SW corner) instead of clamping to
+                // one side: on the small entity parts one side cannot hold k pins at pinPitch, and clamped
+                // pins piled onto the same cells (a later net then started inside another net's core).
+                double u;
+                if (Math.Abs(bp.Y - (p.Cy - hd)) < 1e-6)      u = bp.X - (p.Cx - hw);                 // bottom edge
+                else if (Math.Abs(bp.X - (p.Cx + hw)) < 1e-6) u = W + (bp.Y - (p.Cy - hd));           // right edge
+                else if (Math.Abs(bp.Y - (p.Cy + hd)) < 1e-6) u = W + H + ((p.Cx + hw) - bp.X);       // top edge
+                else                                          u = 2 * W + H + ((p.Cy + hd) - bp.Y);   // left edge
+                u += (s - (k - 1) / 2.0) * pinPitch;
+                u = ((u % per) + per) % per;
+                double x, y;
+                if (u < W)              { x = p.Cx - hw + u;             y = p.Cy - hd; }
+                else if (u < W + H)     { x = p.Cx + hw;                 y = p.Cy - hd + (u - W); }
+                else if (u < 2 * W + H) { x = p.Cx + hw - (u - W - H);   y = p.Cy + hd; }
+                else                    { x = p.Cx - hw;                 y = p.Cy + hd - (u - 2 * W - H); }
                 return new Point3d(x, y, 0);
             }
-            List<(int, int, int)> Route(int sx, int sy, int tx, int ty, HashSet<(int, int, int)> goalSet = null)
+            List<(int, int, int)> Route(int sx, int sy, int tx, int ty, HashSet<(int, int, int)> goalSet = null, int pref = -1)
             {
                 bool bs = blk[sx, sy], bt = blk[tx, ty]; blk[sx, sy] = false; blk[tx, ty] = false;
-                var p = AStar2(sx, sy, tx, ty, blkL, viaOk, usedL, nL, gw, gh, 55.0, false, goalSet);   // vias expensive -> stay on top, dive only when forced
+                var p = AStar2(sx, sy, tx, ty, blkL, viaOk, usedL, nL, gw, gh, 55.0, false, goalSet, pref);   // vias expensive -> stay on top, dive only when forced
                 blk[sx, sy] = bs; blk[tx, ty] = bt; return p;
             }
             // SECOND CHANCE for a pin the top-first router could not place: block the whole top plane so
             // the pin vias at its pad and runs the open inner planes (cheap vias). Replaces most raw jumpers.
             bool[,] blkTopAll = null;
-            List<(int, int, int)> RouteDive(int sx, int sy, int tx, int ty, HashSet<(int, int, int)> goalSet = null)
+            List<(int, int, int)> RouteDive(int sx, int sy, int tx, int ty, HashSet<(int, int, int)> goalSet = null, int pref = -1)
             {
                 if (blkTopAll == null) { blkTopAll = new bool[gw, gh]; for (int i = 0; i < gw; i++) for (int j = 0; j < gh; j++) blkTopAll[i, j] = true; }
                 bool[][,] bl = { blkTopAll, blkBot, blkBot };
-                return AStar2(sx, sy, tx, ty, bl, viaOk, usedL, nL, gw, gh, 6.0, true, goalSet);
+                return AStar2(sx, sy, tx, ty, bl, viaOk, usedL, nL, gw, gh, 6.0, true, goalSet, pref);
             }
+            // PRE-ASSIGN every pin (entity side + one destination slot per net) and BLOCK those cells on the
+            // top plane, so no trace may run through another pin's landing cell. Route() temporarily unblocks
+            // its own start/goal, so each net still reaches its own pins. (Measured: 70 of 157 dropped
+            // reference pins had started on a cell an earlier net's trace already occupied.)
+            var pinPt = new Dictionary<int, Point3d>();                       // edge index -> entity-side pin
+            var destPt = new Dictionary<(int dest, ECls cls), Point3d>();      // net -> destination pin (primary slot)
+            foreach (var key in netOrder)
+            {
+                var eis = netKey[key]; Part D = parts[key.dest];
+                eis.Sort((a, c) => ELen(a).CompareTo(ELen(c)));
+                foreach (int ei in eis) pinPt[ei] = PinPos(parts[edges[ei].A], D.Cx, D.Cy);
+                Part A0 = parts[edges[eis[0]].A];
+                destPt[key] = PinPos(D, A0.Cx, A0.Cy);
+            }
+            // Only the DESTINATION slots are walled off (34 cells): walling every entity pin as well was measured
+            // to remove more corridor capacity than the collisions it prevented (drops rose 157 -> 176).
+            foreach (var pt in destPt.Values) { var (px, py) = Cell(pt); blk[px, py] = true; }
             var jobs = new List<(int ei, int sx, int sy, int tx, int ty, double[] paC, double[] pbC, AcColor col, double w)>();
             var jpath = new List<List<(int, int, int)>>();
             var fallbacks = new List<(double[] paC, double[] pbC, AcColor col)>(); int refDrop = 0, pinsTotal = 0;
+            var dropBy = new Dictionary<(int dest, ECls cls), int>();   // diagnostics: which nets lose reference pins
+            int dropStartBlocked = 0, dropStartRing = 0;                 // ...and whether the failed pin's start cell / its 8-ring was already core
             foreach (var key in netOrder)
             {
                 var eis = netKey[key]; Part D = parts[key.dest];
                 bool isRef = key.cls != ECls.Own;
+                int pref = giantPref.TryGetValue(key, out int gp) ? gp : -1;   // preferred plane for the giant reference nets
                 AcColor col = isRef ? Dim(NetCol(parts, edges[eis[0]]), 0.42) : NetCol(parts, edges[eis[0]]);   // references: dim
                 double w = isRef ? 0.15 : 0.4, land = isRef ? 0.8 : 1.4;
                 eis.Sort((a, c) => ELen(a).CompareTo(ELen(c)));   // nearest pin first: it lays the trunk
                 var netCells = new HashSet<(int, int, int)>();     // copper laid so far for this net (any layer)
-                double[] dC = null; int dx0 = -1, dy0 = -1;
+                double[] dC = null; int dx0 = -1, dy0 = -1; bool destLand = false;
                 foreach (int ei in eis)
                 {
                     pinsTotal++;
                     var e = edges[ei]; Part A = parts[e.A];
-                    Point3d pa = PinPos(A, D.Cx, D.Cy);
+                    // copper INTO entity hardware is a thinner class (small parts, small traces, small lands)
+                    bool ent = A.Band == "entity";
+                    double wp = ent ? (isRef ? 0.12 : 0.24) : w, lp = ent ? (isRef ? 0.6 : 1.0) : land;
+                    Point3d pa = pinPt[ei];                              // pre-assigned (and pre-blocked) pin
                     var (sx, sy) = Cell(pa);
                     double[] paC = { sx * cs + cs / 2, sy * cs + cs / 2 };
-                    b.Box(land, land, 0.14, new Point3d(paC[0], paC[1], 0.07), LNet, col);   // every pin ends on a land
-                    if (dC == null)   // the destination's single pin for this net
+                    b.Box(lp, lp, 0.14, new Point3d(paC[0], paC[1], 0.07), LNet, col);       // every pin ends on a land
+                    List<(int, int, int)> path = null;
+                    if (dC == null)   // the destination's pin for this net: if the trunk cannot reach it, try further perimeter slots
                     {
-                        Point3d pb = PinPos(D, A.Cx, A.Cy); (dx0, dy0) = Cell(pb);
+                        for (int attempt = 0; attempt < 4 && (path == null || path.Count < 2); attempt++)
+                        {
+                            Point3d pb = attempt == 0 ? destPt[key] : PinPos(D, A.Cx, A.Cy); (dx0, dy0) = Cell(pb);   // primary slot first, then further slots
+                            netCells.Clear(); netCells.Add((dx0, dy0, 0));
+                            path = Route(sx, sy, dx0, dy0, netCells, pref);
+                            if (path == null || path.Count < 2) path = RouteDive(sx, sy, dx0, dy0, netCells, pref);
+                        }
                         dC = new[] { dx0 * cs + cs / 2, dy0 * cs + cs / 2 };
-                        b.Box(land, land, 0.14, new Point3d(dC[0], dC[1], 0.07), LNet, col);
-                        netCells.Add((dx0, dy0, 0));
                     }
-                    var path = Route(sx, sy, dx0, dy0, netCells);
-                    if (path == null || path.Count < 2) path = RouteDive(sx, sy, dx0, dy0, netCells);   // 2nd chance: dive, run the inner planes
-                    if (path == null || path.Count < 2) { if (!isRef) fallbacks.Add((paC, dC, col)); else refDrop++; continue; }
+                    else
+                    {
+                        path = Route(sx, sy, dx0, dy0, netCells, pref);
+                        if (path == null || path.Count < 2) path = RouteDive(sx, sy, dx0, dy0, netCells, pref);   // 2nd chance: dive, run the inner planes
+                    }
+                    if (path == null || path.Count < 2)
+                    {
+                        if (!isRef) fallbacks.Add((paC, dC, col));
+                        else
+                        {
+                            refDrop++;
+                            dropBy[key] = dropBy.TryGetValue(key, out int dn) ? dn + 1 : 1;
+                            if (usedL[0][sx, sy] >= CoreMark) dropStartBlocked++;
+                            int ring = 0;
+                            for (int q8 = 0; q8 < 8; q8++) { int rx = sx + D8x[q8], ry = sy + D8y[q8]; if (rx >= 0 && ry >= 0 && rx < gw && ry < gh && usedL[0][rx, ry] >= CoreMark) ring++; }
+                            if (ring >= 6) dropStartRing++;
+                        }
+                        continue;
+                    }
                     ReserveLayers(path, usedL, gw, gh);
+                    if (!destLand) { b.Box(land, land, 0.14, new Point3d(dC[0], dC[1], 0.07), LNet, col); destLand = true; }   // destination land once a route exists
                     foreach (var c3 in path) netCells.Add(c3);
                     var endC = path[path.Count - 1];
                     double[] joinC = { endC.Item1 * cs + cs / 2, endC.Item2 * cs + cs / 2 };   // where it joined: the dest pin or a junction
-                    jobs.Add((ei, sx, sy, dx0, dy0, paC, joinC, col, w)); jpath.Add(path);
+                    jobs.Add((ei, sx, sy, dx0, dy0, paC, joinC, col, wp)); jpath.Add(path);
                 }
             }
             // OPTIMIZER (Freerouting BatchOptimizer idea): rip up each net and re-route it with all
@@ -1188,7 +1286,8 @@ namespace PCD
             try   // routing success diagnostics for the audit loop
             {
                 File.WriteAllText(@"<out>\pcd_route_stats.txt",
-                    "EDGES=" + edges.Count + "\nNETS=" + netKey.Count + "\nPINS=" + pinsTotal + "\nROUTED=" + jobs.Count + "\nFALLBACK=" + fallbacks.Count + "\nREFDROP=" + refDrop + "\n");
+                    "EDGES=" + edges.Count + "\nNETS=" + netKey.Count + "\nPINS=" + pinsTotal + "\nROUTED=" + jobs.Count + "\nFALLBACK=" + fallbacks.Count + "\nREFDROP=" + refDrop
+                    + "\nDROP_START_BLOCKED=" + dropStartBlocked + "\nDROP_START_RING6=" + dropStartRing + "\n" + DropReport(dropBy, netKey, parts));
             } catch { }
             foreach (var net in nets) DrawTrace(b, net.Wp, net.Z, net.Col, net.W);   // render all routed segments
         }
@@ -1197,7 +1296,7 @@ namespace PCD
         // bottom can run under chips). A via switches layer at a legal cell for viaCost. Strictly 0/45/90.
         private static List<(int x, int y, int l)> AStar2(int sx, int sy, int gx, int gy,
             bool[][,] blkL, bool[,] viaOk, int[][,] usedL, int nL,
-            int gw, int gh, double viaCost, bool viaAtEnds = false, HashSet<(int, int, int)> goalSet = null)
+            int gw, int gh, double viaCost, bool viaAtEnds = false, HashSet<(int, int, int)> goalSet = null, int prefLayer = -1)
         {   // goalSet (tree routing): reaching ANY of these (x,y,layer) cells -- the net's existing copper -- is the goal
             double H(int x, int y) { int ax = Math.Abs(x - gx), ay = Math.Abs(y - gy); return Math.Max(ax, ay) + 0.4142 * Math.Min(ax, ay); }
             var g = new Dictionary<(int, int, int, int), double>();
@@ -1224,7 +1323,8 @@ namespace PCD
                     if (D8x[k] != 0 && D8y[k] != 0 && used[cur.x + D8x[k], cur.y] >= CoreMark && used[cur.x, cur.y + D8y[k]] >= CoreMark
                         && !(goalSet != null && (goalSet.Contains((cur.x + D8x[k], cur.y, cur.l)) || goalSet.Contains((cur.x, cur.y + D8y[k], cur.l))))) continue;
                     if (CornerCut(cur.x, cur.y, k, blk)) continue;
-                    double nc = cg + StepCost(k) + TurnCost(cur.d, k) + (used[nx, ny] % CoreMark) * 4.0;   // buffer count -> soft cost
+                    double nc = cg + StepCost(k) + TurnCost(cur.d, k) + (used[nx, ny] % CoreMark) * 4.0    // buffer count -> soft cost
+                              + (prefLayer >= 0 && cur.l != prefLayer ? 0.35 : 0.0);                           // per-net layer preference (giant nets)
                     // BUNDLE bias: reward running parallel-adjacent to an existing trace (forms buses)
                     int px = -D8y[k], py = D8x[k];
                     if ((nx + px >= 0 && ny + py >= 0 && nx + px < gw && ny + py < gh && used[nx + px, ny + py] >= CoreMark) ||
@@ -1280,6 +1380,19 @@ namespace PCD
             return q;
         }
 
+        // diagnostics: dropped reference pins grouped by net, most-dropped first (no Linq)
+        private static string DropReport(Dictionary<(int dest, ECls cls), int> dropBy,
+                                         Dictionary<(int dest, ECls cls), List<int>> netKey, List<Part> parts)
+        {
+            var rows = new List<KeyValuePair<(int dest, ECls cls), int>>(dropBy);
+            rows.Sort((a, b) => b.Value.CompareTo(a.Value));
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in rows)
+                sb.Append("DROP ").Append(kv.Value).Append("  ").Append(kv.Key.cls).Append(" -> ")
+                  .Append(parts[kv.Key.dest].Title).Append("  (net pins=").Append(netKey[kv.Key].Count).Append(")\n");
+            return sb.ToString();
+        }
+
         private static void ReserveLayers(List<(int x, int y, int l)> path, int[][,] usedL, int gw, int gh, int sign = 1)
         {
             foreach (var (ux, uy, l) in path)
@@ -1327,7 +1440,7 @@ namespace PCD
                 var clean = CleanG(pts, blocked, cs, gw, gh, forced);
                 double z = layer == 0 ? ZTop + (seed % 5) * 0.004 : Zof(layer);   // top face / inner plane 1 / inner plane 2
                 if (clean.Count >= 2) nets.Add(new Net { Wp = clean, Z = z, Col = col, Top = layer == 0, W = w });
-                if (j < path.Count) DropVia(b, C(path[j - 1].x), C(path[j - 1].y), col, layer, path[j].l, w <= 0.2);   // blind/buried via spanning exactly these two layers
+                if (j < path.Count) DropVia(b, C(path[j - 1].x), C(path[j - 1].y), col, layer, path[j].l, w < 0.3);   // blind/buried via; thin classes get the small via
                 i = j;
             }
         }
@@ -1341,6 +1454,23 @@ namespace PCD
             int steps = Math.Max(1, (int)(len / (cs * 0.5)));
             for (int s = 1; s < steps; s++)
             { double t = (double)s / steps, x = ax + (bx - ax) * t, y = ay + (by - ay) * t; if (blocked(Cl((int)(x / cs), 0, gw - 1), Cl((int)(y / cs), 0, gh - 1))) return false; }
+            // A 45-degree chord can cross another 45-degree chord at a shared LATTICE CORNER without either
+            // ever entering the other's cells (measured: every residual crossing sat on the lattice). At each
+            // corner this chord steps through, the two cells on the OTHER diagonal may not both be blocked --
+            // the router's own corner rule, applied to the straightened geometry.
+            double ddx = bx - ax, ddy = by - ay;
+            if (Math.Abs(Math.Abs(ddx) - Math.Abs(ddy)) < 1e-6 && Math.Abs(ddx) > cs)
+            {
+                int sx = Math.Sign(ddx), sy = Math.Sign(ddy), n = (int)Math.Round(Math.Abs(ddx) / cs);
+                int i0 = Cl((int)(ax / cs), 0, gw - 1), j0 = Cl((int)(ay / cs), 0, gh - 1);
+                for (int k = 1; k <= n; k++)
+                {
+                    int px = i0 + (k - 1) * sx, py = j0 + (k - 1) * sy, nx = i0 + k * sx, ny = j0 + k * sy;   // cell before / after the corner
+                    int o1x = px, o1y = ny, o2x = nx, o2y = py;                                                    // the other diagonal's two cells
+                    if (o1x < 0 || o1y < 0 || o2x < 0 || o2y < 0 || o1x >= gw || o1y >= gh || o2x >= gw || o2y >= gh) continue;
+                    if (blocked(o1x, o1y) && blocked(o2x, o2y)) return false;
+                }
+            }
             return true;
         }
         private static double[] DoglegG(Func<int, int, bool> blocked, double cs, int gw, int gh, double[] A, double[] B)
@@ -1641,6 +1771,15 @@ namespace PCD
                 case Kind.Array:     return (6.5, 3.0, 1.7, Resistor);
                 case Kind.Socket:    return (7.0, 4.0, 2.2, Terminal);
                 case Kind.TestPad:   return (2.2, 2.2, 0.4, Pad);
+                // ---- extended package family (detailed geometry drawn in PlacePart) ----
+                case Kind.Diode:     return (5.0, 2.2, 1.4, DiodeBk);      // SMD diode w/ cathode band
+                case Kind.Led:       return (3.4, 3.4, 2.4, LedLens[0]);   // domed lens (tint per-part)
+                case Kind.Transistor:return (5.2, 4.4, 4.6, DiodeBk);      // TO-92 half-can + 3 leads
+                case Kind.Crystal:   return (7.2, 3.6, 2.8, CanSilver);    // HC-49 metal can
+                case Kind.Connector: return (10.0, 4.2, 5.4, Plastic);     // pin header in a plastic base
+                case Kind.Relay:     return (9.0, 7.0, 8.0, RelayBlue);    // sealed relay can
+                case Kind.Dip:       return (12.0, 6.0, 3.0, IcBody);      // DIP IC, notch + 2 lead rows
+                case Kind.Pot:       return (7.0, 7.0, 4.5, PotBody);      // potentiometer w/ shaft
                 case Kind.Opaque:    return (p.W > 0 ? p.W : 8.0, p.D > 0 ? p.D : 6.0, p.TopZ > 0 ? p.TopZ : 3.2, OpaqueBk);
                 default:             return (4.5, 2.6, 1.5, Generic);
             }
@@ -1686,7 +1825,7 @@ namespace PCD
                     if (cr < 1.35) {                                        // tiny -> MLCC ceramic block
                         double mh = Math.Max(0.8, topZ * 0.5);
                         b.Box(w, d, mh, new Point3d(cx, cy, mh / 2), layer, Mlcc);
-                        Terminals(b, cx, cy, w, d, mh); topZ = mh; }
+                        Terminals(b, cx, cy, w, d, mh); topZ = mh + 0.22; ShrinkToBody(ref w, ref d); }
                     else if (v == 2 && cr < 2.4) { double hh = Math.Max(1.2, topZ * 0.45);   // ceramic disc
                         b.Cyl(cr, hh, new Point3d(cx, cy, 0), layer, col); topZ = hh; w = d = cr * 1.3; }
                     else {                                                  // electrolytic / tantalum can
@@ -1699,6 +1838,7 @@ namespace PCD
                     double rw = v == 1 ? w * 0.72 : w, rd = v == 1 ? d * 0.66 : d;
                     b.Box(rw, rd, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
                     Terminals(b, cx, cy, w, d, topZ);
+                    topZ += 0.22; ShrinkToBody(ref w, ref d);              // text above the caps, footprint on the body between them
                     break;
                 case Kind.Inductor:
                     if (v == 1) {                                          // drum coil
@@ -1708,6 +1848,80 @@ namespace PCD
                         w = d = ir * 1.3;
                     } else b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
                     break;
+                case Kind.Diode:                                           // SMD diode: dark body + silver cathode band
+                    b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
+                    b.Box(w * 0.14, d * 1.02, topZ * 1.04, new Point3d(cx - w / 2 + w * 0.13, cy, topZ / 2), LPart, Terminal);
+                    Terminals(b, cx, cy, w, d, topZ);
+                    topZ += 0.22; ShrinkToBody(ref w, ref d);              // text above the caps/band, footprint on the body
+                    break;
+                case Kind.Led:                                             // metal base flange + colored dome
+                {
+                    double lr = Math.Max(w, d) / 2;
+                    AcColor lens = LedLens[(int)(part.Idx % LedLens.Length)];
+                    b.Cyl(lr, topZ * 0.26, new Point3d(cx, cy, 0), LPart, Terminal);
+                    b.Cyl(lr * 0.8, topZ * 0.5, new Point3d(cx, cy, topZ * 0.26), layer, lens);
+                    b.Sphere(lr * 0.8, new Point3d(cx, cy, topZ * 0.76), layer, lens);
+                    topZ = topZ * 0.76 + lr * 0.8; w = d = lr * 2;
+                    break;
+                }
+                case Kind.Transistor:                                      // TO-can: tapered body + 3 leads
+                {
+                    double tr = Math.Max(w, d) / 2;
+                    b.Cone(tr, tr * 0.8, topZ, new Point3d(cx, cy, 0.3), layer, col);
+                    for (int i = -1; i <= 1; i++)
+                        b.Cyl(0.26, 1.4, new Point3d(cx + i * tr * 0.5, cy - tr * 0.55, -0.4), LPart, Terminal);
+                    w = d = tr * 2;
+                    topZ = topZ + 0.3;                                     // cone TOP (base sits at 0.3): text lands on the can, not inside it
+                    break;
+                }
+                case Kind.Crystal:                                         // HC-49 metal can + 2 leads
+                    b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
+                    b.Box(w * 0.88, d * 0.7, topZ * 0.16, new Point3d(cx, cy, topZ), LPart, CanSilver);
+                    b.Cyl(0.3, 1.4, new Point3d(cx - w / 2 + 1.2, cy, -0.4), LPart, Terminal);
+                    b.Cyl(0.3, 1.4, new Point3d(cx + w / 2 - 1.2, cy, -0.4), LPart, Terminal);
+                    topZ = topZ * 1.08;                                    // top of the can ridge
+                    break;
+                case Kind.Connector:                                       // pin header: plastic base + gold pins
+                {
+                    b.Box(w, d, topZ * 0.55, new Point3d(cx, cy, topZ * 0.275), layer, col);
+                    int np = Math.Max(2, Math.Min(14, (int)(w / 2.6)));
+                    for (int i = 0; i < np; i++) {
+                        double px = cx - w / 2 + 1.3 + i * (w - 2.6) / Math.Max(1, np - 1);
+                        b.Box(1.0, d * 0.7, topZ * 0.55, new Point3d(px, cy, topZ * 0.275), LPart, Pin1);   // shroud rib
+                        b.Cyl(0.24, topZ, new Point3d(px, cy, topZ * 0.4), LPart, CopTop);                  // gold pin
+                    }
+                    topZ = topZ * 1.4 + 0.05;                              // above the pin tips: text floats clear of the pins
+                    break;
+                }
+                case Kind.Relay:                                           // sealed relay can + base seam + top mark
+                    b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
+                    b.Box(w * 1.03, d * 1.03, topZ * 0.08, new Point3d(cx, cy, topZ * 0.1), LPart, Pin1);
+                    b.Box(w * 0.66, d * 0.44, 0.06, new Point3d(cx, cy, topZ + 0.03), LSilk, Silk);
+                    topZ += 0.1;                                           // above the top mark
+                    break;
+                case Kind.Dip:                                             // DIP IC: body + notch + pin-1 + 2 lead rows
+                {
+                    b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
+                    b.Cyl(d * 0.16, topZ * 0.6, new Point3d(cx - w / 2 + 0.1, cy, topZ * 0.7), LIc, Pin1);   // pin-1 notch
+                    b.Cyl(0.4, 0.25, new Point3d(cx - w / 2 + 1.6, cy - d / 2 + 1.6, topZ), LIc, Pin1);      // pin-1 dot
+                    int ndp = Math.Max(3, Math.Min(10, (int)(w / 2.54)));
+                    for (int i = 0; i < ndp; i++) {
+                        double px = cx - w / 2 + 1.27 + i * (w - 2.54) / Math.Max(1, ndp - 1);
+                        b.Box(0.7, 1.0, 0.25, new Point3d(px, cy + d / 2 + 0.5, 0.25), LPart, Terminal);
+                        b.Box(0.7, 1.0, 0.25, new Point3d(px, cy - d / 2 - 0.5, 0.25), LPart, Terminal);
+                    }
+                    break;
+                }
+                case Kind.Pot:                                             // potentiometer: round body + metal shaft
+                {
+                    double pr = Math.Max(w, d) / 2;
+                    b.Cyl(pr, topZ * 0.6, new Point3d(cx, cy, 0), layer, col);
+                    b.Cyl(pr * 0.34, topZ * 0.55, new Point3d(cx, cy, topZ * 0.6), LPart, Terminal);
+                    b.Box(pr * 0.5, 0.22, topZ * 0.2, new Point3d(cx, cy, topZ * 0.6 + topZ * 0.45), LPart, Pin1);  // slotted top
+                    w = d = pr * 2;
+                    topZ = topZ * 1.15 + 0.05;                             // above the shaft tip: text never inside the shaft
+                    break;
+                }
                 default:
                     b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
                     break;
@@ -1735,12 +1949,34 @@ namespace PCD
             b.Box(2.4, 2.4, 0.35, new Point3d(cx + hx, cy + hy, 0.18), LPart, Terminal);
         }
 
+        /// <summary>Top-layer keep-out half-margin beyond a part's body: its COURTYARD (the silkscreen ring),
+        /// which also encloses the corner hold-down pads (they reach 1.2 past the body) and gull-wing leads.
+        /// Copper routes OUTSIDE courtyards, as on a real board (measured defect: traces over corner pads).</summary>
+        private static double KeepOut(Part p)
+        {
+            bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod || p.Kind == Kind.Record;
+            double om = (p.Kind == Kind.Table || p.Kind == Kind.Nod) ? 3.4 : 2.0;
+            return chip ? Math.Max(om / 2, 1.2) : om / 2;
+        }
+        /// <summary>The refdes silkscreen label rectangle {x0,y0,x1,y1} below the part (same geometry PlacePart
+        /// draws), or null when the part carries no label. Copper stays clear of it (silk keep-out).</summary>
+        private static double[] LabelBox(Part p)
+        {
+            bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod || p.Kind == Kind.Record;
+            bool zoneNamed = p.Kind == Kind.Table || p.Kind == Kind.Nod;
+            if (string.IsNullOrEmpty(p.RefDes) || zoneNamed) return null;
+            double rh = chip ? 1.9 : Math.Max(1.0, Math.Min(1.9, p.Vw * 0.3));
+            double yc = p.Cy - p.Vd / 2 - 1.0 - rh, hw = p.RefDes.Length * CharW * rh / 2 + 0.3, hh = rh / 2 + 0.3;
+            return new[] { p.Cx - hw, yc - hh, p.Cx + hw, yc + hh };
+        }
+
         /// <summary>Perimeter point on part <paramref name="p"/> facing (tx,ty) — where a trace lands.</summary>
         private static Point3d PadPos(Part p, double tx, double ty)
         {
             double dx = tx - p.Cx, dy = ty - p.Cy;
             if (Math.Abs(dx) < 1e-6 && Math.Abs(dy) < 1e-6) return new Point3d(p.Cx, p.Cy, 0);
-            double hw = p.Vw / 2 + 1.3, hd = p.Vd / 2 + 1.3;   // pad centre just past the 0.6 block margin (cell = 1.7) so its grid cell
+            double ko = KeepOut(p) + 0.35;                        // pad centre just outside the courtyard keep-out: its grid cell
+            double hw = p.Vw / 2 + ko, hd = p.Vd / 2 + ko;       // (was: 0.6 body margin + 1.3) -- the old comment lines below still apply:
                                                                // is routable; the 1.4 land spans back to the body edge, so the trace visibly
                                                                // meets the part (vias stay off hardware via viaOk, not via this offset)
             double tX = Math.Abs(dx) > 1e-6 ? hw / Math.Abs(dx) : 1e9;
@@ -1785,6 +2021,14 @@ namespace PCD
                 b.Box(w + 0.6, e, topZ + 0.2, new Point3d(cx, cy - d / 2 + e / 2, (topZ + 0.2) / 2), LPart, Terminal);
                 b.Box(w + 0.6, e, topZ + 0.2, new Point3d(cx, cy + d / 2 - e / 2, (topZ + 0.2) / 2), LPart, Terminal);
             }
+        }
+
+        /// <summary>Shrink a part's text footprint to the body BETWEEN its end terminals (the same
+        /// end-cap width Terminals uses), so the part-data text never overruns onto the caps.</summary>
+        private static void ShrinkToBody(ref double w, ref double d)
+        {
+            if (w >= d) { double e = w * 0.16 + 0.5; w = Math.Max(w * 0.4, w - 2 * e - 0.3); }
+            else        { double e = d * 0.16 + 0.5; d = Math.Max(d * 0.4, d - 2 * e - 0.3); }
         }
 
         // ---- copper router: class-colored L-trace; ownership on top, refs on bottom ----
