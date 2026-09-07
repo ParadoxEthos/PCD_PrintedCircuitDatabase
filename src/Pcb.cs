@@ -316,5 +316,22 @@ namespace PCD
             Place(t, layer, color);
             return t;
         }
+
+        /// <summary>
+        /// Left-justified text standing on a VERTICAL face (the front, -Y side of a part body): built
+        /// flat, rotated 90 deg about X so it reads in +X with its height in +Z, then moved to
+        /// <paramref name="at"/>. Its normal ends up facing -Y. Used where a part's TOP is obstructed
+        /// (a pin header: pins would run straight through text printed on top).
+        /// </summary>
+        public DBText TextLeftFace(string s, Point3d at, double height, string layer,
+                                   AcColor color, ObjectId styleId)
+        {
+            var t = new DBText { TextString = s, Height = height, Position = Point3d.Origin };
+            if (!styleId.IsNull) t.TextStyleId = styleId;
+            t.TransformBy(Matrix3d.Rotation(Math.PI / 2.0, Vector3d.XAxis, Point3d.Origin));
+            t.TransformBy(Matrix3d.Displacement(at - Point3d.Origin));
+            Place(t, layer, color);
+            return t;
+        }
     }
 }

@@ -25,6 +25,8 @@ namespace PCD
         private static readonly AcColor IcBody    = AcColor.FromRgb(40, 40, 48);
         private static readonly AcColor RecBody   = AcColor.FromRgb(54, 54, 64);
         private static readonly AcColor DieBody   = AcColor.FromRgb(58, 46, 30);
+        private static readonly AcColor GpuSub    = AcColor.FromRgb(28, 32, 60);     // GPU substrate (blue-violet)
+        private static readonly AcColor GpuDie    = AcColor.FromRgb(22, 24, 32);     // bare GPU silicon
         private static readonly AcColor CopTop    = AcColor.FromRgb(212, 175, 55);
         private static readonly AcColor CopBot    = AcColor.FromRgb(150, 90, 40);
         private static readonly AcColor Via       = AcColor.FromRgb(228, 198, 92);
@@ -77,6 +79,8 @@ namespace PCD
         // at this fraction of its nominal package size, so it reads as the small discrete parts a real
         // board carries relative to its ICs. Chips (tables/records/CPU) are not scaled.
         private const double EntityScale = 0.62;
+        // Pin-row pitch on a destination chip: one pad per ownership connection, this far apart (>= cs*sqrt2).
+        private const double PinRowPitch = 1.0;
 
         private static readonly Vector3d Up = new Vector3d(0, 0, 1);
         private static readonly Vector3d FaceY = new Vector3d(0, 1, 0);
@@ -122,13 +126,14 @@ namespace PCD
             {
                 var (w, d, z, col) = PartFoot(p);
                 Seed((uint)(p.Idx * 2654435761u + 17u));
-                bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod || p.Kind == Kind.Record;
+                bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod
+                         || p.Kind == Kind.Record || p.Kind == Kind.Gpu;
                 if (chip)
                 {
                     // organic scatter: every chip gets size variety and a random 0/90 orientation
                     p.Vw = w * RR(0.88, 1.18); p.Vd = d * RR(0.88, 1.22); p.Vz = z * RR(0.8, 1.6);
                     p.Variant = (int)(Rnd() % 3);      // SOIC / QFP / DIP lead style
-                    if (p.Kind != Kind.Die && R01() < 0.45) { double t = p.Vw; p.Vw = p.Vd; p.Vd = t; p.Rot = 1; }
+                    if (p.Kind != Kind.Die && p.Kind != Kind.Gpu && R01() < 0.45) { double t = p.Vw; p.Vw = p.Vd; p.Vd = t; p.Rot = 1; }
                 }
                 else if (p.Kind == Kind.Opaque)
                 {
@@ -157,7 +162,7 @@ namespace PCD
             (byte)Clamp(c.Blue + (int)RR(-amt, amt)));
 
         private enum Kind { Die, Table, Record, Nod, Resistor, Capacitor, Inductor, TextPart, Array, Socket, TestPad, Opaque, Generic,
-            Diode, Led, Transistor, Crystal, Connector, Relay, Dip, Pot }
+            Diode, Led, Transistor, Crystal, Connector, Relay, Dip, Pot, Gpu }
         private enum ECls { Own, Layer, Block, Ltype, Style, Dim, App, Bad }
         private sealed class Part
         {
@@ -183,14 +188,15 @@ namespace PCD
         {
             var p = parts[idx];
             int t = (p.Kind == Kind.Table || p.Kind == Kind.Nod) ? idx
-                  : p.Kind == Kind.Record ? p.TableIdx
+                  : (p.Kind == Kind.Record || p.Kind == Kind.Gpu) ? p.TableIdx
                   : p.LayerRec >= 0 ? parts[p.LayerRec].TableIdx : -1;
             return t >= 0 && _tblCol.TryGetValue(t, out var c) ? c : Copper;
         }
         private static AcColor NetCol(List<Part> parts, Edge e)
         {
             Part B = parts[e.B];   // the table side of the relationship owns the net
-            int pick = (B.Kind == Kind.Table || B.Kind == Kind.Nod || B.Kind == Kind.Record) ? e.B : e.A;
+            int pick = (B.Kind == Kind.Table || B.Kind == Kind.Nod || B.Kind == Kind.Record
+                     || B.Kind == Kind.Gpu) ? e.B : e.A;
             return TableColor(parts, pick);
         }
         /// <summary>Dim a color toward black by factor f (0..1) — reference hairlines vs ownership copper.</summary>
@@ -216,6 +222,7 @@ namespace PCD
             if (_srcAny) b.Origin = new Vector3d(Math.Max(0, _srcMaxX) + 15, 0, 0);
             if (!any) { Synthetic(b); return; }
             Vary(parts);
+            SizeByPins(parts, edges);   // a chip grows to hold one pad per connection (a 113-pin hub IS a big chip)
             Layout(parts);
             BuildFromGraph(b, parts, edges);
         }
@@ -478,8 +485,18 @@ namespace PCD
                     && !rec.Name.Equals("*Paper_Space", StringComparison.OrdinalIgnoreCase)) continue;
                 Row[] rows;
                 try { rows = detail(rec); } catch { rows = new[] { Txt(2, "name", rec.Name), Txt(5, "handle", rec.Handle.ToString()) }; }
-                var rp = new Part { Kind = Kind.Record, Band = "record", TableIdx = ti, Col = RecBody,
-                    W = 15, D = 8, TopZ = 2.6, RefDes = "", Rows = rows, Title = tname + " :: " + Short(rec.Name) };
+                // *Model_Space is the GPU. It OWNS every drawable entity, so it carries the widest
+                // ownership bus on the board (one pad per entity) -- the electrical signature of the
+                // second big die. It stays a BLOCK record: its own ownership edge still runs to the
+                // BLOCK table below, so the database mapping is unchanged; only the package differs.
+                bool isMs = tname == "BLOCK" && rec.Name != null
+                            && rec.Name.Equals("*Model_Space", StringComparison.OrdinalIgnoreCase);
+                var rp = isMs
+                    ? new Part { Kind = Kind.Gpu, Band = "record", TableIdx = ti, Col = GpuSub,
+                        W = 46, D = 34, TopZ = 4.0, RefDes = "GPU", Rows = rows,
+                        Title = tname + " :: " + Short(rec.Name) }
+                    : new Part { Kind = Kind.Record, Band = "record", TableIdx = ti, Col = RecBody,
+                        W = 15, D = 8, TopZ = 2.6, RefDes = "", Rows = rows, Title = tname + " :: " + Short(rec.Name) };
                 int ri = add(rp);
                 edges.Add(new Edge { A = ri, B = ti, Cls = ECls.Own });
                 if (map != null && rec.Name != null && !map.ContainsKey(rec.Name)) map[rec.Name] = ri;
@@ -553,7 +570,7 @@ namespace PCD
                 {
                     case Kind.Die: cpu = i; depth[i] = 0; break;
                     case Kind.Table: case Kind.Nod: tables.Add(i); depth[i] = 1; break;
-                    case Kind.Record: parent[i] = p.TableIdx; depth[i] = 2; break;
+                    case Kind.Record: case Kind.Gpu: parent[i] = p.TableIdx; depth[i] = 2; break;
                     default: parent[i] = p.OwnerIdx >= 0 ? p.OwnerIdx : p.LayerRec; depth[i] = 3; break;
                 }
             }
@@ -665,6 +682,7 @@ namespace PCD
                         if (p.Title.StartsWith("LAYER")) layerTbl = p.Idx;
                         break;
                     case Kind.Record:
+                    case Kind.Gpu:
                         if (!tableRecs.TryGetValue(p.TableIdx, out var lr)) { lr = new List<Part>(); tableRecs[p.TableIdx] = lr; }
                         lr.Add(p);
                         break;
@@ -1082,22 +1100,51 @@ namespace PCD
                     }
                 return null;
             }
-            // bottom-layer jumper (fallback) with LEGAL off-pad vias; every segment octilinear
-            void BottomJumper(double[] paC, double[] pbC, AcColor col, double w, Func<int, int, bool> bTop, Func<int, int, bool> bMid)
+            // bottom-layer jumper (fallback) with LEGAL off-pad vias; every segment octilinear.
+            // Three measured defects lived here and produced every residual same-layer crossing:
+            //   (a) the inner run is DRAWN at Zof(2) but was straightened against usedMid (layer 1's
+            //       occupancy) -- blkL shares blkBot across layers 1/2, usedL does NOT share a grid,
+            //       so the check consulted the wrong plane and jumpers cut through bottom A* copper;
+            //   (b) a jumper never reserved its own cells (it emits geometry, not an A* cell path),
+            //       so jumper N+1 was blind to jumper N -- jumper x jumper crossings;
+            //   (c) CleanG's 2-point branch returns the RAW straight line when no dogleg is clear,
+            //       so a jumper with no legal route was drawn straight through whatever was there.
+            // Fixed by checking the drawn plane, letting the run pick the inner plane that is
+            // actually free, reserving what it lays down, and validating the result before use.
+            int jumpMid = 0, jumpDirty = 0;
+            void BottomJumper(double[] paC, double[] pbC, AcColor col, double w,
+                              Func<int, int, bool> bTop, Func<int, int, bool> bMid, Func<int, int, bool> bBot)
             {
                 var va = SnapVia(paC[0], paC[1], 12); var vb = SnapVia(pbC[0], pbC[1], 12);
                 if (va == null || vb == null)
                 {   // nowhere legal to via near a pad -> the WHOLE jumper runs on the deepest inner plane (allowed
                     // under hardware) with its vias at the pad cells. NEVER an unrouted top-layer L across the board.
                     DropVia(b, paC[0], paC[1], col, 0, 2); DropVia(b, pbC[0], pbC[1], col, 0, 2);
-                    nets.Add(new Net { Wp = new List<double[]> { paC, new[] { pbC[0], paC[1] }, pbC }, Z = Zof(2), Col = col, Top = false, W = w });
+                    var lp = new List<double[]> { paC, new[] { pbC[0], paC[1] }, pbC };
+                    nets.Add(new Net { Wp = lp, Z = Zof(2), Col = col, Top = false, W = w });
+                    ReserveWorld(lp, usedBot, cs, gw, gh);
                     return;
                 }
-                DropVia(b, va[0], va[1], col, 0, 2); DropVia(b, vb[0], vb[1], col, 0, 2);
+                // pick the inner plane that is actually free: bottom first, then middle. Layers 1 and 2
+                // are separate copper, so this roughly doubles the jumper capacity instead of piling
+                // every fallback onto layer 2.
+                int jl = 2; var run = CleanG(new List<double[]> { va, vb }, bBot, cs, gw, gh);
+                if (!PathClearG(run, bBot, cs, gw, gh))
+                {
+                    var alt = CleanG(new List<double[]> { va, vb }, bMid, cs, gw, gh);
+                    if (PathClearG(alt, bMid, cs, gw, gh)) { jl = 1; run = alt; jumpMid++; }
+                    else jumpDirty++;   // no legal inner route at all -> last resort, counted not hidden
+                }
+                DropVia(b, va[0], va[1], col, 0, jl); DropVia(b, vb[0], vb[1], col, 0, jl);
                 // stubs and the inner run are straightened against hardware AND other nets' cells (no crossings)
-                nets.Add(new Net { Wp = CleanG(new List<double[]> { paC, va }, bTop, cs, gw, gh), Z = ZTop, Col = col, Top = true, W = w });
-                nets.Add(new Net { Wp = CleanG(new List<double[]> { va, vb }, bMid, cs, gw, gh), Z = Zof(2), Col = col, Top = false, W = w });
-                nets.Add(new Net { Wp = CleanG(new List<double[]> { vb, pbC }, bTop, cs, gw, gh), Z = ZTop, Col = col, Top = true, W = w });
+                var s1 = CleanG(new List<double[]> { paC, va }, bTop, cs, gw, gh);
+                var s2 = CleanG(new List<double[]> { vb, pbC }, bTop, cs, gw, gh);
+                nets.Add(new Net { Wp = s1,  Z = ZTop,     Col = col, Top = true,  W = w });
+                nets.Add(new Net { Wp = run, Z = Zof(jl),  Col = col, Top = false, W = w });
+                nets.Add(new Net { Wp = s2,  Z = ZTop,     Col = col, Top = true,  W = w });
+                ReserveWorld(s1,  used,       cs, gw, gh);
+                ReserveWorld(run, jl == 1 ? usedMid : usedBot, cs, gw, gh);   // usedL is declared below this local fn
+                ReserveWorld(s2,  used,       cs, gw, gh);
             }
 
             // ---- 2-LAYER OCTILINEAR ROUTER (learned from Freerouting on this exact board: ~60% of
@@ -1179,23 +1226,62 @@ namespace PCD
                 bool[][,] bl = { blkTopAll, blkBot, blkBot };
                 return AStar2(sx, sy, tx, ty, bl, viaOk, usedL, nL, gw, gh, 6.0, true, goalSet, pref);
             }
-            // PRE-ASSIGN every pin (entity side + one destination slot per net) and BLOCK those cells on the
-            // top plane, so no trace may run through another pin's landing cell. Route() temporarily unblocks
-            // its own start/goal, so each net still reaches its own pins. (Measured: 70 of 157 dropped
-            // reference pins had started on a cell an earlier net's trace already occupied.)
-            var pinPt = new Dictionary<int, Point3d>();                       // edge index -> entity-side pin
-            var destPt = new Dictionary<(int dest, ECls cls), Point3d>();      // net -> destination pin (primary slot)
+            // DESTINATION PIN ROWS. Every OWNERSHIP relationship lands on its OWN pad on the destination chip (a
+            // real chip has one pin per connection), spread along the chip's perimeter in the order the
+            // connections arrive from, at PinRowPitch. Reference nets keep one shared pad (tree) -- that sharing
+            // is what keeps hundreds of hairlines routable. (Defect this replaces: every branch of a table's
+            // tree converged on one pad.)
+            double ArcOf(Part p, double tx, double ty)   // arc-length (CCW from the SW corner) of the facing point
+            {
+                var bp = PadPos(p, tx, ty);
+                double ko = KeepOut(p) + 0.35, hw = p.Vw / 2 + ko, hd = p.Vd / 2 + ko, W = 2 * hw, H = 2 * hd;
+                if (Math.Abs(bp.Y - (p.Cy - hd)) < 1e-6) return bp.X - (p.Cx - hw);
+                if (Math.Abs(bp.X - (p.Cx + hw)) < 1e-6) return W + (bp.Y - (p.Cy - hd));
+                if (Math.Abs(bp.Y - (p.Cy + hd)) < 1e-6) return W + H + ((p.Cx + hw) - bp.X);
+                return 2 * W + H + ((p.Cy + hd) - bp.Y);
+            }
+            double PerOf(Part p) { double ko = KeepOut(p) + 0.35; return 2 * ((p.Vw + 2 * ko) + (p.Vd + 2 * ko)); }
+            Point3d AtArc(Part p, double u)
+            {
+                double ko = KeepOut(p) + 0.35, hw = p.Vw / 2 + ko, hd = p.Vd / 2 + ko, W = 2 * hw, H = 2 * hd, per = 2 * (W + H);
+                u = ((u % per) + per) % per;
+                if (u < W)         return new Point3d(p.Cx - hw + u,           p.Cy - hd, 0);
+                if (u < W + H)     return new Point3d(p.Cx + hw,               p.Cy - hd + (u - W), 0);
+                if (u < 2 * W + H) return new Point3d(p.Cx + hw - (u - W - H), p.Cy + hd, 0);
+                return new Point3d(p.Cx - hw, p.Cy + hd - (u - 2 * W - H), 0);
+            }
+            var pinPt = new Dictionary<int, Point3d>();                       // edge index -> source-side pin
+            var destPt = new Dictionary<(int dest, ECls cls), Point3d>();      // reference net -> its shared destination pad
+            var destPin = new Dictionary<int, Point3d>();                      // ownership edge -> its OWN destination pad
+            var rows = new Dictionary<int, List<(double u, int ei, (int dest, ECls cls) key)>>();   // chip -> requested pads
             foreach (var key in netOrder)
             {
                 var eis = netKey[key]; Part D = parts[key.dest];
                 eis.Sort((a, c) => ELen(a).CompareTo(ELen(c)));
                 foreach (int ei in eis) pinPt[ei] = PinPos(parts[edges[ei].A], D.Cx, D.Cy);
-                Part A0 = parts[edges[eis[0]].A];
-                destPt[key] = PinPos(D, A0.Cx, A0.Cy);
+                if (!rows.TryGetValue(key.dest, out var lst)) rows[key.dest] = lst = new List<(double, int, (int, ECls))>();
+                if (key.cls == ECls.Own) foreach (int ei in eis) { Part A = parts[edges[ei].A]; lst.Add((ArcOf(D, A.Cx, A.Cy), ei, key)); }
+                else { Part A0 = parts[edges[eis[0]].A]; lst.Add((ArcOf(D, A0.Cx, A0.Cy), -1, key)); }
             }
-            // Only the DESTINATION slots are walled off (34 cells): walling every entity pin as well was measured
-            // to remove more corridor capacity than the collisions it prevented (drops rose 157 -> 176).
-            foreach (var pt in destPt.Values) { var (px, py) = Cell(pt); blk[px, py] = true; }
+            foreach (var kv in rows)   // spread each chip's pads along its perimeter: arrival order kept, pitch enforced
+            {
+                Part D = parts[kv.Key]; var lst = kv.Value; double per = PerOf(D);
+                lst.Sort((a, c) => a.u.CompareTo(c.u));
+                double pitch = Math.Min(PinRowPitch, per / Math.Max(1, lst.Count));   // never more pads than the ring holds
+                var us = new double[lst.Count];
+                for (int i = 0; i < lst.Count; i++) us[i] = i == 0 ? lst[i].u : Math.Max(lst[i].u, us[i - 1] + pitch);
+                if (lst.Count > 1 && us[lst.Count - 1] - us[0] > per - pitch)          // wrapped onto the first pad: even spread
+                    for (int i = 0; i < lst.Count; i++) us[i] = us[0] + i * (per / lst.Count);
+                for (int i = 0; i < lst.Count; i++)
+                {
+                    var pt = AtArc(D, us[i]);
+                    if (lst[i].ei >= 0) destPin[lst[i].ei] = pt; else destPt[lst[i].key] = pt;
+                }
+            }
+            // Destination pads are walled off so no trace may run through another connection's landing cell
+            // (walling every SOURCE pin as well was measured to remove more corridor capacity than it saved).
+            foreach (var pt in destPin.Values) { var (px, py) = Cell(pt); blk[px, py] = true; }
+            foreach (var pt in destPt.Values)  { var (px, py) = Cell(pt); blk[px, py] = true; }
             var jobs = new List<(int ei, int sx, int sy, int tx, int ty, double[] paC, double[] pbC, AcColor col, double w)>();
             var jpath = new List<List<(int, int, int)>>();
             var fallbacks = new List<(double[] paC, double[] pbC, AcColor col)>(); int refDrop = 0, pinsTotal = 0;
@@ -1210,7 +1296,7 @@ namespace PCD
                 double w = isRef ? 0.15 : 0.4, land = isRef ? 0.8 : 1.4;
                 eis.Sort((a, c) => ELen(a).CompareTo(ELen(c)));   // nearest pin first: it lays the trunk
                 var netCells = new HashSet<(int, int, int)>();     // copper laid so far for this net (any layer)
-                double[] dC = null; int dx0 = -1, dy0 = -1; bool destLand = false;
+                double[] dCref = null; int rx0 = -1, ry0 = -1; bool destLand = false;   // the reference net's shared pad
                 foreach (int ei in eis)
                 {
                     pinsTotal++;
@@ -1222,20 +1308,29 @@ namespace PCD
                     var (sx, sy) = Cell(pa);
                     double[] paC = { sx * cs + cs / 2, sy * cs + cs / 2 };
                     b.Box(lp, lp, 0.14, new Point3d(paC[0], paC[1], 0.07), LNet, col);       // every pin ends on a land
-                    List<(int, int, int)> path = null;
-                    if (dC == null)   // the destination's pin for this net: if the trunk cannot reach it, try further perimeter slots
+                    List<(int, int, int)> path = null; int dx0, dy0; double[] dC;
+                    if (!isRef)   // OWNERSHIP: this connection's OWN pad on the destination chip (pin row) -- no tree join
+                    {
+                        (dx0, dy0) = Cell(destPin[ei]); dC = new[] { dx0 * cs + cs / 2, dy0 * cs + cs / 2 };
+                        path = Route(sx, sy, dx0, dy0, null, pref);
+                        if (path == null || path.Count < 2) path = RouteDive(sx, sy, dx0, dy0, null, pref);
+                        if (path != null && path.Count >= 2)
+                        { double dl = Math.Min(land, PinRowPitch * 0.85); b.Box(dl, dl, 0.14, new Point3d(dC[0], dC[1], 0.07), LNet, col); }
+                    }
+                    else if (dCref == null)   // REFERENCE: the net's shared pad; if the trunk cannot reach it, try further slots
                     {
                         for (int attempt = 0; attempt < 4 && (path == null || path.Count < 2); attempt++)
                         {
-                            Point3d pb = attempt == 0 ? destPt[key] : PinPos(D, A.Cx, A.Cy); (dx0, dy0) = Cell(pb);   // primary slot first, then further slots
-                            netCells.Clear(); netCells.Add((dx0, dy0, 0));
-                            path = Route(sx, sy, dx0, dy0, netCells, pref);
-                            if (path == null || path.Count < 2) path = RouteDive(sx, sy, dx0, dy0, netCells, pref);
+                            Point3d pb = attempt == 0 ? destPt[key] : PinPos(D, A.Cx, A.Cy); (rx0, ry0) = Cell(pb);
+                            netCells.Clear(); netCells.Add((rx0, ry0, 0));
+                            path = Route(sx, sy, rx0, ry0, netCells, pref);
+                            if (path == null || path.Count < 2) path = RouteDive(sx, sy, rx0, ry0, netCells, pref);
                         }
-                        dC = new[] { dx0 * cs + cs / 2, dy0 * cs + cs / 2 };
+                        dCref = new[] { rx0 * cs + cs / 2, ry0 * cs + cs / 2 }; dx0 = rx0; dy0 = ry0; dC = dCref;
                     }
                     else
                     {
+                        dx0 = rx0; dy0 = ry0; dC = dCref;
                         path = Route(sx, sy, dx0, dy0, netCells, pref);
                         if (path == null || path.Count < 2) path = RouteDive(sx, sy, dx0, dy0, netCells, pref);   // 2nd chance: dive, run the inner planes
                     }
@@ -1254,8 +1349,8 @@ namespace PCD
                         continue;
                     }
                     ReserveLayers(path, usedL, gw, gh);
-                    if (!destLand) { b.Box(land, land, 0.14, new Point3d(dC[0], dC[1], 0.07), LNet, col); destLand = true; }   // destination land once a route exists
-                    foreach (var c3 in path) netCells.Add(c3);
+                    if (isRef && !destLand) { b.Box(land, land, 0.14, new Point3d(dC[0], dC[1], 0.07), LNet, col); destLand = true; }   // shared pad once a route exists
+                    if (isRef) foreach (var c3 in path) netCells.Add(c3);   // only reference nets grow a tree
                     var endC = path[path.Count - 1];
                     double[] joinC = { endC.Item1 * cs + cs / 2, endC.Item2 * cs + cs / 2 };   // where it joined: the dest pin or a junction
                     jobs.Add((ei, sx, sy, dx0, dy0, paC, joinC, col, wp)); jpath.Add(path);
@@ -1282,12 +1377,16 @@ namespace PCD
             for (int q = 0; q < jobs.Count; q++)   // draw final: ownership copper 0.4, reference hairlines 0.15
                 PathToNets(jpath[q], jobs[q].paC, jobs[q].pbC, jobs[q].col, cs, gw, gh, blkL, b, nets, jobs[q].ei, jobs[q].w, usedL, junctions);
             foreach (var f in fallbacks)
-                BottomJumper(f.paC, f.pbC, f.col, 0.3, (i, j) => blk[i, j] || used[i, j] >= CoreMark, (i, j) => blkBot[i, j] || usedMid[i, j] >= CoreMark);
+                BottomJumper(f.paC, f.pbC, f.col, 0.3,
+                    (i, j) => blk[i, j]    || used[i, j]    >= CoreMark,
+                    (i, j) => blkBot[i, j] || usedMid[i, j] >= CoreMark,
+                    (i, j) => blkBot[i, j] || usedBot[i, j] >= CoreMark);
             try   // routing success diagnostics for the audit loop
             {
                 File.WriteAllText(@"<out>\pcd_route_stats.txt",
                     "EDGES=" + edges.Count + "\nNETS=" + netKey.Count + "\nPINS=" + pinsTotal + "\nROUTED=" + jobs.Count + "\nFALLBACK=" + fallbacks.Count + "\nREFDROP=" + refDrop
-                    + "\nDROP_START_BLOCKED=" + dropStartBlocked + "\nDROP_START_RING6=" + dropStartRing + "\n" + DropReport(dropBy, netKey, parts));
+                    + "\nDROP_START_BLOCKED=" + dropStartBlocked + "\nDROP_START_RING6=" + dropStartRing
+                    + "\nJUMP_MID=" + jumpMid + "\nJUMP_DIRTY=" + jumpDirty + "\n" + DropReport(dropBy, netKey, parts));
             } catch { }
             foreach (var net in nets) DrawTrace(b, net.Wp, net.Z, net.Col, net.W);   // render all routed segments
         }
@@ -1393,6 +1492,41 @@ namespace PCD
             return sb.ToString();
         }
 
+        /// <summary>Every segment of a straightened world-coordinate path is clear of <paramref name="blocked"/>.
+        /// CleanG's 2-point branch hands back the RAW straight line when no dogleg is clear, so a caller that
+        /// must not cross anything has to re-check what it got.</summary>
+        private static bool PathClearG(List<double[]> wp, Func<int, int, bool> blocked, double cs, int gw, int gh)
+        {
+            if (wp == null || wp.Count < 2) return false;
+            for (int i = 1; i < wp.Count; i++)
+                if (!SegClearG(blocked, cs, gw, gh, wp[i - 1][0], wp[i - 1][1], wp[i][0], wp[i][1])) return false;
+            return true;
+        }
+
+        /// <summary>Mark a world-coordinate polyline into one layer's occupancy grid the way ReserveLayers marks
+        /// an A* cell path: CoreMark on the cells the copper covers, +1 on the 4-neighbour buffer. Bottom jumpers
+        /// are emitted as geometry rather than cell paths, so without this every jumper is invisible to the next.</summary>
+        private static void ReserveWorld(List<double[]> wp, int[,] u, double cs, int gw, int gh)
+        {
+            if (wp == null || wp.Count < 2) return;
+            var seen = new HashSet<(int, int)>();
+            for (int i = 1; i < wp.Count; i++)
+            {
+                double ax = wp[i - 1][0], ay = wp[i - 1][1], bx = wp[i][0], by = wp[i][1];
+                double len = Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+                int steps = Math.Max(1, (int)(len / (cs * 0.5)));
+                for (int t = 0; t <= steps; t++)
+                {
+                    double f = (double)t / steps, x = ax + (bx - ax) * f, y = ay + (by - ay) * f;
+                    int ux = Cl((int)(x / cs), 0, gw - 1), uy = Cl((int)(y / cs), 0, gh - 1);
+                    if (!seen.Add((ux, uy))) continue;
+                    u[ux, uy] += CoreMark;
+                    if (ux > 0) u[ux - 1, uy]++; if (ux < gw - 1) u[ux + 1, uy]++;
+                    if (uy > 0) u[ux, uy - 1]++; if (uy < gh - 1) u[ux, uy + 1]++;
+                }
+            }
+        }
+
         private static void ReserveLayers(List<(int x, int y, int l)> path, int[][,] usedL, int gw, int gh, int sign = 1)
         {
             foreach (var (ux, uy, l) in path)
@@ -1440,6 +1574,12 @@ namespace PCD
                 var clean = CleanG(pts, blocked, cs, gw, gh, forced);
                 double z = layer == 0 ? ZTop + (seed % 5) * 0.004 : Zof(layer);   // top face / inner plane 1 / inner plane 2
                 if (clean.Count >= 2) nets.Add(new Net { Wp = clean, Z = z, Col = col, Top = layer == 0, W = w });
+                // RE-RESERVE WHAT WAS ACTUALLY DRAWN. usedL holds each path's ORIGINAL A* cells; CleanG then
+                // moves the copper OFF them to cut corners. Without this, net A vacates cells into free space
+                // and net B straightens straight through that space -- both see only the other's original
+                // cells, so two straightened doglegs cross where neither A* path ever went. (Measured: 4
+                // same-layer crossings on the bottom plane, every one of them a straightened run.)
+                if (ug != null && clean.Count >= 2) ReserveWorld(clean, ug, cs, gw, gh);
                 if (j < path.Count) DropVia(b, C(path[j - 1].x), C(path[j - 1].y), col, layer, path[j].l, w < 0.3);   // blind/buried via; thin classes get the small via
                 i = j;
             }
@@ -1506,7 +1646,8 @@ namespace PCD
         private static List<double[]> CleanG(List<double[]> pts, bool[,] grid, double cs, int gw, int gh) => CleanG(pts, (i, j) => grid[i, j], cs, gw, gh);
 
         private static int Depth(Part p) =>
-            p.Kind == Kind.Die ? 0 : (p.Kind == Kind.Table || p.Kind == Kind.Nod) ? 1 : p.Kind == Kind.Record ? 2 : 3;
+            p.Kind == Kind.Die ? 0 : (p.Kind == Kind.Table || p.Kind == Kind.Nod) ? 1
+          : (p.Kind == Kind.Record || p.Kind == Kind.Gpu) ? 2 : 3;
 
         // COPPER-LAYER STACKUP. The board slab spans z=0 (top face) to z=-BT (bottom face). Layer 0 is
         // the top copper, just proud of the top face; layers 1 and 2 are INNER planes embedded WITHIN
@@ -1763,6 +1904,7 @@ namespace PCD
                 case Kind.Table:     return (p.W, p.D, p.TopZ, IcBody);    // table IC (large)
                 case Kind.Nod:       return (p.W, p.D, p.TopZ, IcBody);
                 case Kind.Record:    return (13, 8, 2.6, RecBody);         // record chip (medium)
+                case Kind.Gpu:       return (p.W, p.D, p.TopZ, GpuSub);    // *Model_Space (2nd big die)
                 // discrete passives are SMALL relative to the ICs (like a real board)
                 case Kind.Resistor:  return (5.0, 2.0, 1.3, Resistor);
                 case Kind.Capacitor: return (3.0, 3.0, 3.0, Capacitor);
@@ -1790,7 +1932,9 @@ namespace PCD
             AcColor col = part.Col;
             double w = part.Vw, d = part.Vd, topZ = Math.Max(0.6, part.Vz), cx = part.Cx, cy = part.Cy;
             int v = part.Variant;
-            bool isChip = part.Kind == Kind.Die || part.Kind == Kind.Table || part.Kind == Kind.Nod || part.Kind == Kind.Record;
+            double faceH = 0;   // >0 : this package's top is obstructed -> data prints on its front side
+            bool isChip = part.Kind == Kind.Die || part.Kind == Kind.Table || part.Kind == Kind.Nod
+                       || part.Kind == Kind.Record || part.Kind == Kind.Gpu;
             string layer = isChip ? LIc : LPart;
 
             if (part.Kind == Kind.Die)
@@ -1804,6 +1948,29 @@ namespace PCD
                 b.Box(w * 0.6, d * 0.6, ihsH, new Point3d(cx, cy, ihsBase + ihsH / 2), LPart, Terminal); // IHS
                 b.Cyl(0.6, 0.25, new Point3d(cx - w / 2 + 3, cy - d / 2 + 3, subZ), LIc, Pin1);          // pin-1
                 w *= 0.6; d *= 0.6; topZ = ihsBase + ihsH;      // the DATABASE pod lands on the heatspreader
+            }
+            else if (part.Kind == Kind.Gpu)
+            {
+                // GPU: blue-violet substrate, four flanking VRAM packages, a bare die under a cold
+                // plate. Deliberately NOT the CPU package (no stepped IHS) so the two big dies read
+                // apart at a glance.
+                double subZ = 1.4;
+                b.Box(w, d, subZ, new Point3d(cx, cy, subZ / 2), LIc, GpuSub);
+                FourPads(b, cx, cy, w, d);                          // 4 silver hold-down pads
+                double vw = w * 0.17, vd = d * 0.17, vz = 1.0;      // VRAM, one package per quadrant
+                for (int sx = -1; sx <= 1; sx += 2)
+                    for (int sy = -1; sy <= 1; sy += 2)
+                    {
+                        double vx = cx + sx * w * 0.39, vy = cy + sy * d * 0.39;
+                        b.Box(vw, vd, vz, new Point3d(vx, vy, subZ + vz / 2), LIc, IcBody);
+                        b.Cyl(Math.Min(0.3, vw * 0.12), 0.14,
+                              new Point3d(vx - vw / 2 + vw * 0.2, vy + vd / 2 - vd * 0.2, subZ + vz), LIc, Silk);
+                    }
+                double dieH = 1.2, dieBase = subZ;
+                b.Box(w * 0.5, d * 0.5, dieH, new Point3d(cx, cy, dieBase + dieH / 2), LIc, GpuDie);
+                b.Box(w * 0.56, d * 0.56, 0.35, new Point3d(cx, cy, dieBase + dieH + 0.175), LPart, CanSilver);
+                b.Cyl(0.6, 0.25, new Point3d(cx - w / 2 + 3, cy - d / 2 + 3, subZ), LIc, Silk);   // pin-1
+                w *= 0.56; d *= 0.56; topZ = dieBase + dieH + 0.35;  // the pod lands on the cold plate
             }
             else if (isChip)
             {
@@ -1884,6 +2051,7 @@ namespace PCD
                 case Kind.Connector:                                       // pin header: plastic base + gold pins
                 {
                     b.Box(w, d, topZ * 0.55, new Point3d(cx, cy, topZ * 0.275), layer, col);
+                    faceH = topZ * 0.55;   // the black base: data block goes on ITS side, clear of the pins
                     int np = Math.Max(2, Math.Min(14, (int)(w / 2.6)));
                     for (int i = 0; i < np; i++) {
                         double px = cx - w / 2 + 1.3 + i * (w - 2.6) / Math.Max(1, np - 1);
@@ -1936,7 +2104,8 @@ namespace PCD
             }
             // part data prints ON the hardware body itself (auto-fit to the part), entities
             // included; the binary/katakana rain still rises from the part.
-            Pod(b, part.Title, part.Rows, cx, cy, w * 0.9, d * 0.86, topZ, part.Kind == Kind.Opaque, part.Idx);
+            if (faceH > 0) PodFace(b, part.Title, part.Rows, cx, cy, w * 0.9, d, faceH, topZ, part.Idx);
+            else Pod(b, part.Title, part.Rows, cx, cy, w * 0.9, d * 0.86, topZ, part.Kind == Kind.Opaque, part.Idx);
         }
 
         /// <summary>Four silver hold-down pads at a chip's corners (mechanical, not signal).</summary>
@@ -1949,12 +2118,30 @@ namespace PCD
             b.Box(2.4, 2.4, 0.35, new Point3d(cx + hx, cy + hy, 0.18), LPart, Terminal);
         }
 
+        /// <summary>Grow any chip whose perimeter cannot hold one pad per OWNERSHIP connection (plus one shared
+        /// pad per reference net) at PinRowPitch. Uniform growth keeps the package proportions.</summary>
+        private static void SizeByPins(List<Part> parts, List<Edge> edges)
+        {
+            var own = new int[parts.Count]; var refs = new HashSet<(int, ECls)>();
+            foreach (var e in edges) { if (e.Cls == ECls.Own) own[e.B]++; else refs.Add((e.B, e.Cls)); }
+            var nref = new int[parts.Count]; foreach (var k in refs) nref[k.Item1]++;
+            foreach (var p in parts)
+            {
+                int n = own[p.Idx] + nref[p.Idx]; if (n == 0) continue;
+                double ko = KeepOut(p) + 0.35, need = n * PinRowPitch + 4.0, have = 2 * ((p.Vw + 2 * ko) + (p.Vd + 2 * ko));
+                if (need <= have) continue;
+                double f = (need - 8 * ko) / (2 * (p.Vw + p.Vd));   // exact: new perimeter (incl. keep-out ring) == need
+                if (f > 1) { p.Vw *= f; p.Vd *= f; }
+            }
+        }
+
         /// <summary>Top-layer keep-out half-margin beyond a part's body: its COURTYARD (the silkscreen ring),
         /// which also encloses the corner hold-down pads (they reach 1.2 past the body) and gull-wing leads.
         /// Copper routes OUTSIDE courtyards, as on a real board (measured defect: traces over corner pads).</summary>
         private static double KeepOut(Part p)
         {
-            bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod || p.Kind == Kind.Record;
+            bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod
+                     || p.Kind == Kind.Record || p.Kind == Kind.Gpu;
             double om = (p.Kind == Kind.Table || p.Kind == Kind.Nod) ? 3.4 : 2.0;
             return chip ? Math.Max(om / 2, 1.2) : om / 2;
         }
@@ -1962,7 +2149,8 @@ namespace PCD
         /// draws), or null when the part carries no label. Copper stays clear of it (silk keep-out).</summary>
         private static double[] LabelBox(Part p)
         {
-            bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod || p.Kind == Kind.Record;
+            bool chip = p.Kind == Kind.Die || p.Kind == Kind.Table || p.Kind == Kind.Nod
+                     || p.Kind == Kind.Record || p.Kind == Kind.Gpu;
             bool zoneNamed = p.Kind == Kind.Table || p.Kind == Kind.Nod;
             if (string.IsNullOrEmpty(p.RefDes) || zoneNamed) return null;
             double rh = chip ? 1.9 : Math.Max(1.0, Math.Min(1.9, p.Vw * 0.3));
@@ -2421,6 +2609,35 @@ namespace PCD
                             BitH * 1.05, LKata, KataRed, FaceY, _kata);   // spaced vertically (KataStep)
                 }
             }
+        }
+
+        /// <summary>Pod for a part whose TOP is obstructed (pin header): the entget block prints on the
+        /// FRONT SIDE of the body, where pins cannot run through it. The rain still rises from the part.</summary>
+        private static void PodFace(Pcb b, string title, Row[] rows, double cx, double cy, double w, double d,
+                                    double bodyH, double ztop, int seed = 0)
+        {
+            var lines = new string[rows.Length];
+            for (int i = 0; i < rows.Length; i++)
+                lines[i] = rows[i].Code.ToString().PadRight(3) + rows[i].Name.PadRight(11) + rows[i].Disp;
+            FitBlockFace(b, title, lines, cx, cy - d / 2 - 0.04, w, bodyH);
+            var cols = new List<string>();
+            foreach (Row rr in rows) foreach (double v in rr.Reals) cols.Add(Bits64(v));
+            Rain(b, cx, cy, ztop, cols);
+        }
+
+        /// <summary>FitBlock laid on a vertical front face: the block is fitted to the face's width x height
+        /// and centred on it, reading in +X with line spacing running down in -Z.</summary>
+        private static void FitBlockFace(Pcb b, string header, string[] lines, double cx, double yFace, double w, double faceH)
+        {
+            int lmax = header.Length;
+            foreach (var t in lines) if (t.Length > lmax) lmax = t.Length;
+            int rows = lines.Length + 1;
+            double h = Math.Min((w * Margin) / (lmax * CharW), (faceH * Margin) / (rows * Pitch));
+            double headH = h * 1.15, gap = h * Pitch, blockH = headH + lines.Length * gap;
+            double x = cx - (w * Margin) / 2.0, zHead = faceH / 2.0 + blockH / 2.0 - headH;
+            b.TextLeftFace(header, new Point3d(x, yFace, zHead), headH, LSilk, Silk, _mono);
+            for (int i = 0; i < lines.Length; i++)
+                b.TextLeftFace(lines[i], new Point3d(x, yFace, zHead - gap * (i + 1)), h, LData, Data, _mono);
         }
 
         private static void FitBlock(Pcb b, string header, string[] lines, double cx, double cy, double w, double d, double z)
