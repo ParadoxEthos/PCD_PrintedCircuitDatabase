@@ -79,6 +79,62 @@ namespace PCD
             }
         }
 
+        /// <summary>Build the coverage template into the ACTIVE drawing: the minimum set of entities
+        /// and symbol-table records that exercises every package and every relationship class PCD
+        /// renders. Never saves the drawing -- do a SAVEAS afterwards to keep it as a .dwg.</summary>
+        [CommandMethod("PCDTEMPLATE")]
+        public void Template() { InvokeCore("PCD.Template", "Build"); }
+
+        /// <summary>Erase every model-space entity so PCDTEMPLATE can rebuild from a clean slate.</summary>
+        [CommandMethod("PCDTEMPLATERESET")]
+        public void TemplateReset() { InvokeCore("PCD.Template", "Reset"); }
+
+        /// <summary>Hot-load PCD.Core and invoke one static (Database, Transaction) entry point.
+        /// The template commands live in THIS assembly rather than a second shim because the loader
+        /// is NETLOADed once per session anyway -- one load, every command.</summary>
+        private void InvokeCore(string typeName, string method)
+        {
+            Document doc = AcAp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+            string path = CorePath();
+            if (!File.Exists(path)) { ed.WriteMessage("\nPCD.Core.dll not found: " + path + "\n"); return; }
+
+            var alc = new AssemblyLoadContext("pcdcore", isCollectible: true);
+            try
+            {
+                Assembly asm;
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    asm = alc.LoadFromStream(fs);
+
+                Type t = asm.GetType(typeName);
+                MethodInfo mi = t?.GetMethod(method, new[] { typeof(Database), typeof(Transaction) });
+                if (mi == null)
+                {
+                    ed.WriteMessage("\nPCD.Core: " + typeName + "." + method + "(Database,Transaction) not found.\n");
+                    return;
+                }
+
+                object result;
+                using (doc.LockDocument())
+                using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    result = mi.Invoke(null, new object[] { doc.Database, tr });
+                    tr.Commit();
+                }
+                ed.WriteMessage("\n" + (result as string ?? "done") + "\n");
+            }
+            catch (TargetInvocationException tie)
+            {
+                ed.WriteMessage("\n" + method + " error: " + (tie.InnerException?.ToString() ?? tie.Message) + "\n");
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\n" + method + " error: " + ex + "\n");
+            }
+            finally { alc.Unload(); }
+        }
+
         /// <summary>Frames the board: SW isometric, zoom extents, realistic shading.</summary>
         [CommandMethod("PCDVIEW")]
         public void View()

@@ -16,8 +16,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\src\Paths.cs" />
     <Compile Include="..\src\Pcb.cs" />
     <Compile Include="..\src\Demo.cs" />
+    <Compile Include="..\src\Template.cs" />
   </ItemGroup>
 
   <ItemGroup>

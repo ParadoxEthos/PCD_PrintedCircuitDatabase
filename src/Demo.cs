@@ -48,6 +48,10 @@ namespace PCD
         private static readonly AcColor RelayBlue = AcColor.FromRgb(38, 66, 150);     // relay / large module case
         private static readonly AcColor PotBody   = AcColor.FromRgb(28, 56, 140);     // potentiometer body
         private static readonly AcColor Plastic   = AcColor.FromRgb(24, 24, 28);      // connector plastic base
+        private static readonly AcColor ShieldTin = AcColor.FromRgb(176, 180, 188);   // EMI shield can
+        private static readonly AcColor HeatAl    = AcColor.FromRgb(150, 154, 160);   // anodised heatsink
+        private static readonly AcColor Glass     = AcColor.FromRgb(22, 30, 38);      // display glass
+        private static readonly AcColor FuseGl    = AcColor.FromRgb(198, 186, 150);   // fuse cartridge glass
         private static readonly AcColor[] LedLens = {                                 // LED lens tints (picked by handle)
             AcColor.FromRgb(235, 60, 55), AcColor.FromRgb(70, 220, 90),
             AcColor.FromRgb(70, 130, 255), AcColor.FromRgb(255, 176, 40), AcColor.FromRgb(240, 240, 245) };
@@ -75,6 +79,10 @@ namespace PCD
         // three unrelated buffers summing to 3 read as a core and hard-blocked cells nobody occupied,
         // which closed corridors early and starved later nets (measured: 118 of 450 edges routed).
         private const int CoreMark = 50;
+        // Per-cell penalty for top copper crossing refdes lettering. Large enough that a via down
+        // to an inner plane and back (viaCost 55 each way) always beats crossing a multi-cell
+        // label, small enough to stay finite so a walled-in net still routes instead of dropping.
+        private const int SilkCost = 260;
         // Entity-band hardware (the drawing's entities: passives, LEDs, connectors, ACIS boxes) is drawn
         // at this fraction of its nominal package size, so it reads as the small discrete parts a real
         // board carries relative to its ICs. Chips (tables/records/CPU) are not scaled.
@@ -162,7 +170,9 @@ namespace PCD
             (byte)Clamp(c.Blue + (int)RR(-amt, amt)));
 
         private enum Kind { Die, Table, Record, Nod, Resistor, Capacitor, Inductor, TextPart, Array, Socket, TestPad, Opaque, Generic,
-            Diode, Led, Transistor, Crystal, Connector, Relay, Dip, Pot, Gpu }
+            Diode, Led, Transistor, Crystal, Connector, Relay, Dip, Pot, Gpu,
+            // types that used to collapse to Generic, now packaged
+            Shield, Sensor, Coil, Antenna, Memory, Fuse, Heatsink, Ribbon, Display, Rail }
         private enum ECls { Own, Layer, Block, Ltype, Style, Dim, App, Bad }
         private sealed class Part
         {
@@ -242,6 +252,8 @@ namespace PCD
             var blockMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var ltMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var styMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var dimMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var appMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
             int Add(Part p) { p.Idx = parts.Count; parts.Add(p); return p.Idx; }
 
@@ -265,8 +277,8 @@ namespace PCD
             int lLayer = AddTable(db, tr, db.LayerTableId, "LAYER", parts, edges, die, Add, layerMap, tr2 => LayerRows(tr2));
             int lLt    = AddTable(db, tr, db.LinetypeTableId, "LTYPE", parts, edges, die, Add, ltMap, tr2 => LtypeRows(tr2));
             int lSty   = AddTable(db, tr, db.TextStyleTableId, "STYLE", parts, edges, die, Add, styMap, tr2 => StyleRows(tr2));
-            AddTable(db, tr, db.DimStyleTableId, "DIMSTYLE", parts, edges, die, Add, null, tr2 => DimRows(tr2));
-            AddTable(db, tr, db.RegAppTableId, "APPID", parts, edges, die, Add, null, tr2 => NameOnly(tr2));
+            AddTable(db, tr, db.DimStyleTableId, "DIMSTYLE", parts, edges, die, Add, dimMap, tr2 => DimRows(tr2));
+            AddTable(db, tr, db.RegAppTableId, "APPID", parts, edges, die, Add, appMap, tr2 => NameOnly(tr2));
             AddTable(db, tr, db.ViewportTableId, "VPORT", parts, edges, die, Add, null, tr2 => NameOnly(tr2));
             AddTable(db, tr, db.ViewTableId, "VIEW", parts, edges, die, Add, null, tr2 => NameOnly(tr2));
             AddTable(db, tr, db.UcsTableId, "UCS", parts, edges, die, Add, null, tr2 => NameOnly(tr2));
@@ -289,6 +301,7 @@ namespace PCD
             var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
             var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
             int r = 0, c = 0, l = 0, t = 0, j = 0, tp = 0, g = 0, dd = 0, q = 0, y = 0, kk = 0, u = 0, rv = 0;
+            int mp = 0, mk = 0, ee = 0, ff = 0, hs = 0, ds = 0, ww = 0;
             // ACIS b-reps are collected, then MERGED by touching bounding box into one chip
             // per physical part (a sheet-metal part is one chip, not 30 region boxes).
             var acis = new List<AcisBox>();
@@ -306,10 +319,38 @@ namespace PCD
                     Num(62, "color ACI", e.ColorIndex), Rl(48, "lt scale", e.LinetypeScale),
                 };
                 Kind k; double mag = 0;
+                // Matched by DXF NAME rather than by managed type: these classes are not all exposed
+                // the same way across host versions, and the name is what the database actually stores.
+                // Each still emits the full Own + Layer + Ltype relationship set; this only decides the
+                // package it wears, so no relationship depends on the match succeeding.
+                Kind? byName = ty switch
+                {
+                    "HATCH"       => Kind.Shield,     // a fill pattern -> a perforated EMI shield can
+                    "DIMENSION"   => Kind.Sensor,     // a measurement -> a sensor package with a port
+                    "SPLINE"      => Kind.Coil,       // a wound curve -> an air-core wound inductor
+                    "LEADER"      => Kind.Antenna,    // points somewhere -> a chip antenna + whip
+                    "MULTILEADER" => Kind.Antenna,
+                    "ACAD_TABLE"  => Kind.Memory,     // rows and columns -> a memory edge card
+                    "ATTDEF"      => Kind.Fuse,       // a named slot -> a cartridge fuse in clips
+                    "WIPEOUT"     => Kind.Heatsink,   // masks what is under it -> a finned heatsink
+                    "MLINE"       => Kind.Ribbon,     // parallel conductors -> an IDC ribbon header
+                    "3DFACE"      => Kind.Display,    // a flat plate -> a glass display module
+                    "XLINE"       => Kind.Rail,       // unbounded -> a power bus bar on standoffs
+                    "RAY"         => Kind.Rail,
+                    _             => (Kind?)null,
+                };
                 // sub-variety WITHIN a DXF family is picked by the entity's own handle (reproducible,
                 // data-derived): one DXF type -> a family of realistic packages, so the board reads varied.
                 long hh = 0; try { hh = e.Handle.Value; } catch { } hh = Math.Abs(hh);
-                switch (e)
+                if (byName.HasValue)
+                {
+                    k = byName.Value;
+                    try { var xb = e.GeometricExtents;
+                          rows.Add(Pt(10, "min pt", xb.MinPoint.X, xb.MinPoint.Y, xb.MinPoint.Z));
+                          rows.Add(Pt(11, "max pt", xb.MaxPoint.X, xb.MaxPoint.Y, xb.MaxPoint.Z));
+                          mag = xb.MaxPoint.DistanceTo(xb.MinPoint); } catch { }
+                }
+                else switch (e)
                 {
                     case Line ln:
                         rows.Add(Pt(10, "start pt", ln.StartPoint.X, ln.StartPoint.Y, ln.StartPoint.Z));
@@ -371,6 +412,11 @@ namespace PCD
                         Kind.Diode => "D" + (++dd), Kind.Led => "D" + (++dd), Kind.Transistor => "Q" + (++q),
                         Kind.Crystal => "Y" + (++y), Kind.Connector => "J" + (++j), Kind.Relay => "K" + (++kk),
                         Kind.Dip => "U" + (++u), Kind.Pot => "RV" + (++rv),
+                        Kind.Shield => "MP" + (++mp), Kind.Sensor => "MK" + (++mk),
+                        Kind.Coil => "L" + (++l), Kind.Antenna => "E" + (++ee),
+                        Kind.Memory => "U" + (++u), Kind.Fuse => "F" + (++ff),
+                        Kind.Heatsink => "HS" + (++hs), Kind.Ribbon => "J" + (++j),
+                        Kind.Display => "DS" + (++ds), Kind.Rail => "W" + (++ww),
                         _ => "X" + (++g) } });
 
                 // OWNERSHIP edge (the routed copper): the entity belongs to *Model_Space.
@@ -386,6 +432,22 @@ namespace PCD
                 if (e is MText mtt) TryStyle(tr, mtt.TextStyleId, styMap, idx, edges);
                 if (e is BlockReference bref && blockMap.TryGetValue(bref.Name, out int bi))
                     edges.Add(new Edge { A = idx, B = bi, Cls = ECls.Block });
+                // A dimension REFERENCES the DIMSTYLE it is drawn with. Before this, ECls.Dim was
+                // declared and never emitted, so the DIMSTYLE chip sat on the board with records but
+                // no traffic -- two of nine symbol tables were decorative.
+                if (e is Dimension dmn)
+                { try { if (dimMap.TryGetValue(dmn.DimensionStyleName, out int dsi))
+                            edges.Add(new Edge { A = idx, B = dsi, Cls = ECls.Dim }); } catch { } }
+                // Xdata REFERENCES the APPID that registered it: group 1001 opens each app's block,
+                // so one edge per distinct registered application on this entity.
+                try { var xd = e.XData;
+                      if (xd != null)
+                      { var seenApp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (TypedValue tv in xd)
+                            if (tv.TypeCode == (short)DxfCode.ExtendedDataRegAppName && tv.Value != null)
+                            { string an = tv.Value.ToString();
+                              if (seenApp.Add(an) && appMap.TryGetValue(an, out int ai))
+                                  edges.Add(new Edge { A = idx, B = ai, Cls = ECls.App }); } } } catch { }
             }
 
             AddMergedAcis(acis, parts, edges, layerMap, msIdx, Add, ref g);
@@ -967,7 +1029,7 @@ namespace PCD
             // NETS are collected first and drawn after crossing resolution (vias + bottom hops)
             var nets = new List<Net>();
 
-            try { WriteDsn(parts, edges, poly, @"pcd.dsn"); } catch { }   // study dump
+            if (Paths.DsnEnabled) try { WriteDsn(parts, edges, poly, Paths.Out("pcd.dsn")); } catch { }   // Freerouting study dump (opt-in via PCD_DSN)
 
             // ---- grid MAZE ROUTER: every trace stays on TOP and routes AROUND chip footprints ----
             const double cs = 0.6;   // routing grid: fine enough for the compacted layout's 3 giant reference nets (measured: 1.2 starved them, 0.8 left 58 dropped)
@@ -983,12 +1045,22 @@ namespace PCD
             for (int gx = 0; gx < gw; gx++) for (int gy = 0; gy < gh; gy++)          // nothing routes off the board
                 if (!PointInPoly(poly, (gx + 0.5) * cs, (gy + 0.5) * cs)) blk[gx, gy] = true;
             var used = new int[gw, gh];   // occupancy: traces avoid cells already used -> parallel lanes
-            foreach (var p in parts)      // refdes silkscreen: a SOFT cost (real DRC allows silk over masked traces,
-            {                             // not over pads) -- routed around when cheap, crossed when the corridor needs it.
-                var lb = LabelBox(p); if (lb == null) continue;   // (hard-blocking labels was measured to cost 82 reference pins)
-                int lx0 = Cl((int)(lb[0] / cs), 0, gw - 1), lx1 = Cl((int)(lb[2] / cs), 0, gw - 1);
-                int ly0 = Cl((int)(lb[1] / cs), 0, gh - 1), ly1 = Cl((int)(lb[3] / cs), 0, gh - 1);
-                for (int gx = lx0; gx <= lx1; gx++) for (int gy = ly0; gy <= ly1; gy++) used[gx, gy] += 2;
+            // Refdes silkscreen keep-out, kept in its OWN grid rather than folded into `used`.
+            // `used` encodes two things already -- the hard-block test (>= CoreMark) and the +1
+            // per-neighbour buffers -- so any label cost large enough to actually deflect a trace
+            // would wrap past CoreMark once a buffer landed on the same cell and wall it off by
+            // accident. A separate grid has no ceiling and no interaction with either.
+            // It applies to LAYER 0 ONLY: silkscreen is printed on the top face, so inner and
+            // bottom copper run beneath the lettering without ever obscuring it. That is also why
+            // this can be expensive without dropping nets -- the router dives instead of failing,
+            // which is what hard-blocking labels (measured at 82 lost reference pins) could not do.
+            var silk = new int[gw, gh];
+            foreach (var p in parts)
+            {
+                var lb = LabelBox(p); if (lb == null) continue;
+                int lx0 = Cl((int)((lb[0] - cs) / cs), 0, gw - 1), lx1 = Cl((int)((lb[2] + cs) / cs), 0, gw - 1);
+                int ly0 = Cl((int)((lb[1] - cs) / cs), 0, gh - 1), ly1 = Cl((int)((lb[3] + cs) / cs), 0, gh - 1);
+                for (int gx = lx0; gx <= lx1; gx++) for (int gy = ly0; gy <= ly1; gy++) silk[gx, gy] = SilkCost;
             }
 
             // ---- every relationship is a routed net. Nets INTO the same chip merge into one tree
@@ -1214,7 +1286,7 @@ namespace PCD
             List<(int, int, int)> Route(int sx, int sy, int tx, int ty, HashSet<(int, int, int)> goalSet = null, int pref = -1)
             {
                 bool bs = blk[sx, sy], bt = blk[tx, ty]; blk[sx, sy] = false; blk[tx, ty] = false;
-                var p = AStar2(sx, sy, tx, ty, blkL, viaOk, usedL, nL, gw, gh, 55.0, false, goalSet, pref);   // vias expensive -> stay on top, dive only when forced
+                var p = AStar2(sx, sy, tx, ty, blkL, viaOk, usedL, nL, gw, gh, 55.0, false, goalSet, pref, silk);   // vias expensive -> stay on top, dive only when forced
                 blk[sx, sy] = bs; blk[tx, ty] = bt; return p;
             }
             // SECOND CHANCE for a pin the top-first router could not place: block the whole top plane so
@@ -1224,7 +1296,7 @@ namespace PCD
             {
                 if (blkTopAll == null) { blkTopAll = new bool[gw, gh]; for (int i = 0; i < gw; i++) for (int j = 0; j < gh; j++) blkTopAll[i, j] = true; }
                 bool[][,] bl = { blkTopAll, blkBot, blkBot };
-                return AStar2(sx, sy, tx, ty, bl, viaOk, usedL, nL, gw, gh, 6.0, true, goalSet, pref);
+                return AStar2(sx, sy, tx, ty, bl, viaOk, usedL, nL, gw, gh, 6.0, true, goalSet, pref, silk);
             }
             // DESTINATION PIN ROWS. Every OWNERSHIP relationship lands on its OWN pad on the destination chip (a
             // real chip has one pin per connection), spread along the chip's perimeter in the order the
@@ -1375,7 +1447,7 @@ namespace PCD
             var junctions = new HashSet<(int, int, int)>();   // every cell where a branch joined its net's copper
             foreach (var pth in jpath) junctions.Add(pth[pth.Count - 1]);
             for (int q = 0; q < jobs.Count; q++)   // draw final: ownership copper 0.4, reference hairlines 0.15
-                PathToNets(jpath[q], jobs[q].paC, jobs[q].pbC, jobs[q].col, cs, gw, gh, blkL, b, nets, jobs[q].ei, jobs[q].w, usedL, junctions);
+                PathToNets(jpath[q], jobs[q].paC, jobs[q].pbC, jobs[q].col, cs, gw, gh, blkL, b, nets, jobs[q].ei, jobs[q].w, usedL, junctions, silk);
             foreach (var f in fallbacks)
                 BottomJumper(f.paC, f.pbC, f.col, 0.3,
                     (i, j) => blk[i, j]    || used[i, j]    >= CoreMark,
@@ -1383,7 +1455,7 @@ namespace PCD
                     (i, j) => blkBot[i, j] || usedBot[i, j] >= CoreMark);
             try   // routing success diagnostics for the audit loop
             {
-                File.WriteAllText(@"<out>\pcd_route_stats.txt",
+                File.WriteAllText(Paths.Out("pcd_route_stats.txt"),
                     "EDGES=" + edges.Count + "\nNETS=" + netKey.Count + "\nPINS=" + pinsTotal + "\nROUTED=" + jobs.Count + "\nFALLBACK=" + fallbacks.Count + "\nREFDROP=" + refDrop
                     + "\nDROP_START_BLOCKED=" + dropStartBlocked + "\nDROP_START_RING6=" + dropStartRing
                     + "\nJUMP_MID=" + jumpMid + "\nJUMP_DIRTY=" + jumpDirty + "\n" + DropReport(dropBy, netKey, parts));
@@ -1395,7 +1467,8 @@ namespace PCD
         // bottom can run under chips). A via switches layer at a legal cell for viaCost. Strictly 0/45/90.
         private static List<(int x, int y, int l)> AStar2(int sx, int sy, int gx, int gy,
             bool[][,] blkL, bool[,] viaOk, int[][,] usedL, int nL,
-            int gw, int gh, double viaCost, bool viaAtEnds = false, HashSet<(int, int, int)> goalSet = null, int prefLayer = -1)
+            int gw, int gh, double viaCost, bool viaAtEnds = false, HashSet<(int, int, int)> goalSet = null, int prefLayer = -1,
+            int[,] silk = null)
         {   // goalSet (tree routing): reaching ANY of these (x,y,layer) cells -- the net's existing copper -- is the goal
             double H(int x, int y) { int ax = Math.Abs(x - gx), ay = Math.Abs(y - gy); return Math.Max(ax, ay) + 0.4142 * Math.Min(ax, ay); }
             var g = new Dictionary<(int, int, int, int), double>();
@@ -1423,6 +1496,7 @@ namespace PCD
                         && !(goalSet != null && (goalSet.Contains((cur.x + D8x[k], cur.y, cur.l)) || goalSet.Contains((cur.x, cur.y + D8y[k], cur.l))))) continue;
                     if (CornerCut(cur.x, cur.y, k, blk)) continue;
                     double nc = cg + StepCost(k) + TurnCost(cur.d, k) + (used[nx, ny] % CoreMark) * 4.0    // buffer count -> soft cost
+                             + (cur.l == 0 && silk != null ? silk[nx, ny] : 0)                                  // top copper off the lettering
                               + (prefLayer >= 0 && cur.l != prefLayer ? 0.35 : 0.0);                           // per-net layer preference (giant nets)
                     // BUNDLE bias: reward running parallel-adjacent to an existing trace (forms buses)
                     int px = -D8y[k], py = D8x[k];
@@ -1548,7 +1622,7 @@ namespace PCD
         // split a 2-layer cell path into per-layer octilinear net segments + a via at each layer switch
         private static void PathToNets(List<(int x, int y, int l)> path, double[] pa, double[] pb, AcColor col,
             double cs, int gw, int gh, bool[][,] blkL, Pcb b, List<Net> nets, int seed, double w = 0.3, int[][,] usedL = null,
-            HashSet<(int, int, int)> junctions = null)
+            HashSet<(int, int, int)> junctions = null, int[,] silk = null)
         {
             double C(int v) => v * cs + cs / 2;
             int i = 0;
@@ -1570,7 +1644,12 @@ namespace PCD
                 // junction cells stay as vertices so every branch end lands exactly on the drawn trunk
                 var own = new HashSet<(int, int)>(); for (int k = i; k < j; k++) own.Add((path[k].x, path[k].y));
                 bool[,] bg = blkL[layer]; int[,] ug = usedL?[layer];
-                Func<int, int, bool> blocked = (x, y) => bg[x, y] || (ug != null && ug[x, y] >= CoreMark && !own.Contains((x, y)));
+                // On the top layer the lettering is a hard stop for STRAIGHTENING: A* already paid to
+                // route around it, and a dogleg that cuts the corner would put the trace straight back
+                // across the text. If that leaves nothing to straighten, CleanG keeps the A* path --
+                // a failed straighten costs a few bends, never a dropped net.
+                Func<int, int, bool> blocked = (x, y) => bg[x, y] || (ug != null && ug[x, y] >= CoreMark && !own.Contains((x, y)))
+                                                     || (layer == 0 && silk != null && silk[x, y] > 0);
                 var clean = CleanG(pts, blocked, cs, gw, gh, forced);
                 double z = layer == 0 ? ZTop + (seed % 5) * 0.004 : Zof(layer);   // top face / inner plane 1 / inner plane 2
                 if (clean.Count >= 2) nets.Add(new Net { Wp = clean, Z = z, Col = col, Top = layer == 0, W = w });
@@ -1922,6 +2001,16 @@ namespace PCD
                 case Kind.Relay:     return (9.0, 7.0, 8.0, RelayBlue);    // sealed relay can
                 case Kind.Dip:       return (12.0, 6.0, 3.0, IcBody);      // DIP IC, notch + 2 lead rows
                 case Kind.Pot:       return (7.0, 7.0, 4.5, PotBody);      // potentiometer w/ shaft
+                case Kind.Shield:    return (9.0, 7.0, 2.4, ShieldTin);    // perforated EMI shield can
+                case Kind.Sensor:    return (4.6, 4.6, 2.2, IcBody);       // sensor pkg + metal lid + port
+                case Kind.Coil:      return (6.4, 6.4, 4.2, Inductor);     // air-core wound inductor
+                case Kind.Antenna:   return (7.4, 2.8, 1.3, Plastic);      // chip antenna + meander whip
+                case Kind.Memory:    return (16.0, 3.2, 7.2, Board);       // memory edge card, standing
+                case Kind.Fuse:      return (6.4, 2.8, 2.4, FuseGl);       // cartridge fuse in clips
+                case Kind.Heatsink:  return (8.0, 8.0, 6.0, HeatAl);       // finned heatsink
+                case Kind.Ribbon:    return (11.0, 4.8, 4.4, Plastic);     // shrouded IDC ribbon header
+                case Kind.Display:   return (12.0, 8.0, 1.8, Glass);       // glass display module + FPC
+                case Kind.Rail:      return (10.0, 1.8, 1.8, CopTop);      // bus bar on two standoffs
                 case Kind.Opaque:    return (p.W > 0 ? p.W : 8.0, p.D > 0 ? p.D : 6.0, p.TopZ > 0 ? p.TopZ : 3.2, OpaqueBk);
                 default:             return (4.5, 2.6, 1.5, Generic);
             }
@@ -2090,6 +2179,114 @@ namespace PCD
                     topZ = topZ * 1.15 + 0.05;                             // above the shaft tip: text never inside the shaft
                     break;
                 }
+                case Kind.Shield:                                          // HATCH: perforated EMI can
+                {
+                    b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), LPart, ShieldTin);
+                    b.Box(w * 1.06, d * 1.06, 0.25, new Point3d(cx, cy, 0.12), LPart, Terminal);   // solder skirt
+                    int hx2 = Math.Max(2, Math.Min(6, (int)(w / 2.2))), hy2 = Math.Max(2, Math.Min(6, (int)(d / 2.2)));
+                    for (int i = 0; i < hx2; i++)
+                        for (int q2 = 0; q2 < hy2; q2++)
+                            b.Cyl(0.26, 0.14, new Point3d(cx - w / 2 + (i + 0.5) * w / hx2,
+                                                          cy - d / 2 + (q2 + 0.5) * d / hy2, topZ - 0.06), LPart, Pin1);
+                    break;
+                }
+                case Kind.Sensor:                                          // DIMENSION: sensor + port
+                    b.Box(w, d, topZ * 0.62, new Point3d(cx, cy, topZ * 0.31), layer, col);
+                    b.Box(w * 0.84, d * 0.84, topZ * 0.3, new Point3d(cx, cy, topZ * 0.77), LPart, CanSilver);
+                    b.Cyl(Math.Min(w, d) * 0.13, topZ * 0.3, new Point3d(cx, cy, topZ * 0.8), LIc, Pin1);   // port hole
+                    Terminals(b, cx, cy, w, d, topZ * 0.62);
+                    topZ = topZ * 0.92;
+                    break;
+                case Kind.Coil:                                            // SPLINE: air-core wound
+                {
+                    double kr = Math.Max(w, d) / 2;
+                    b.Cyl(kr * 0.32, topZ, new Point3d(cx, cy, 0), LPart, Plastic);          // bobbin
+                    for (int i = 0; i < 5; i++)
+                        b.Torus(kr * 0.7, kr * 0.15, new Point3d(cx, cy, topZ * (0.16 + 0.17 * i)), LPart, CopTop);
+                    b.Cyl(0.26, 1.3, new Point3d(cx - kr * 0.7, cy, -0.4), LPart, Terminal);
+                    b.Cyl(0.26, 1.3, new Point3d(cx + kr * 0.7, cy, -0.4), LPart, Terminal);
+                    b.Cyl(kr * 0.95, topZ * 0.09, new Point3d(cx, cy, topZ), LPart, Plastic);   // top flange
+                    topZ = topZ * 1.09;                     // flat flange face: the block sits ON it
+                    w = d = kr * 1.34;                      // and is sized to the flange, not the windings
+                    break;
+                }
+                case Kind.Antenna:                                         // LEADER: chip antenna + whip
+                {
+                    b.Box(w * 0.46, d, topZ, new Point3d(cx - w * 0.27, cy, topZ / 2), layer, col);
+                    double seg = w * 0.54 / 4;
+                    for (int i = 0; i < 4; i++)                            // meander whip, copper on the face
+                    {
+                        double mx = cx - w * 0.04 + i * seg;
+                        b.Box(0.16, d * 0.86, 0.1, new Point3d(mx, cy, 0.05), LNet, CopTop);
+                        b.Box(seg, 0.16, 0.1, new Point3d(mx + seg / 2, cy + (i % 2 == 0 ? d * 0.43 : -d * 0.43), 0.05), LNet, CopTop);
+                    }
+                    b.Box(0.9, 0.9, 0.2, new Point3d(cx - w * 0.5, cy, 0.1), LPart, Pad);     // feed pad
+                    cx = cx - w * 0.27; w = w * 0.46;        // the block prints ON the ceramic, not over the whip
+                    break;
+                }
+                case Kind.Memory:                                          // ACAD_TABLE: DIMM edge card
+                {
+                    double card = 0.5;
+                    b.Box(w, card, topZ, new Point3d(cx, cy, topZ / 2), LIc, Board);          // the card, edge-on
+                    int nd = Math.Max(2, Math.Min(8, (int)(w / 3.6)));
+                    for (int i = 0; i < nd; i++)
+                        b.Box(w / nd * 0.68, card + 0.9, topZ * 0.28,
+                              new Point3d(cx - w / 2 + (i + 0.5) * w / nd, cy, topZ * 0.6), LIc, IcBody);
+                    int nfg = nd * 3;
+                    for (int i = 0; i < nfg; i++)                          // gold edge fingers
+                        b.Box(w / nfg * 0.5, card + 0.16, 0.5,
+                              new Point3d(cx - w / 2 + (i + 0.5) * w / nfg, cy, 0.25), LPart, CopTop);
+                    d = card + 0.9;
+                    faceH = topZ * 0.9;   // a card is too thin to print on top: the block goes on its face
+                    break;
+                }
+                case Kind.Fuse:                                            // ATTDEF: cartridge in clips
+                    b.Box(w * 0.62, d * 0.72, topZ * 0.64, new Point3d(cx, cy, topZ * 0.5), LPart, FuseGl);
+                    b.Box(w * 0.15, d * 0.92, topZ * 0.8, new Point3d(cx - w * 0.42, cy, topZ * 0.44), LPart, Terminal);
+                    b.Box(w * 0.15, d * 0.92, topZ * 0.8, new Point3d(cx + w * 0.42, cy, topZ * 0.44), LPart, Terminal);
+                    b.Box(w * 0.56, 0.14, 0.1, new Point3d(cx, cy, topZ * 0.5), LPart, Pin1);   // the element
+                    topZ = topZ * 0.82; w = w * 0.62; d = d * 0.72;   // land on the cartridge, not above it
+                    break;
+                case Kind.Heatsink:                                        // WIPEOUT: finned block
+                {
+                    double bh = topZ * 0.2;
+                    b.Box(w, d, bh, new Point3d(cx, cy, bh / 2), LPart, HeatAl);
+                    int nf = Math.Max(3, Math.Min(9, (int)(w / 1.3)));
+                    for (int i = 0; i < nf; i++)
+                        b.Box(w / nf * 0.42, d, topZ - bh,
+                              new Point3d(cx - w / 2 + (i + 0.5) * w / nf, cy, bh + (topZ - bh) / 2), LPart, HeatAl);
+                    break;
+                }
+                case Kind.Ribbon:                                          // MLINE: shrouded IDC header
+                {
+                    b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, Plastic);
+                    b.Box(w * 0.84, d * 0.46, topZ * 0.72, new Point3d(cx, cy, topZ * 0.66), LIc, Pin1);   // cavity
+                    faceH = topZ * 0.9;   // pins fill the top -> the data block prints on the side
+                    int nr = Math.Max(4, Math.Min(16, (int)(w / 1.0)));
+                    for (int i = 0; i < nr; i++)
+                    {
+                        double px = cx - w * 0.38 + i * (w * 0.76) / Math.Max(1, nr - 1);
+                        b.Box(0.32, 0.32, topZ * 0.5, new Point3d(px, cy + d * 0.11, topZ * 0.45), LPart, CopTop);
+                        b.Box(0.32, 0.32, topZ * 0.5, new Point3d(px, cy - d * 0.11, topZ * 0.45), LPart, CopTop);
+                    }
+                    b.Box(w * 0.18, 0.3, topZ * 0.16, new Point3d(cx, cy + d / 2, topZ), LPart, Plastic);  // polarising key
+                    break;
+                }
+                case Kind.Display:                                         // 3DFACE: glass module + FPC
+                    b.Box(w, d, topZ * 0.36, new Point3d(cx, cy, topZ * 0.18), LIc, IcBody);          // carrier
+                    b.Box(w * 0.92, d * 0.88, topZ * 0.5, new Point3d(cx, cy, topZ * 0.61), LPart, Glass);
+                    b.Box(w * 0.78, d * 0.7, 0.06, new Point3d(cx, cy, topZ * 0.87), LSilk, Capacitor); // active area
+                    b.Box(w * 0.3, d * 0.18, 0.12, new Point3d(cx, cy - d / 2 - d * 0.09, 0.06), LPart, CopTop);  // FPC tail
+                    topZ = topZ * 0.86; w = w * 0.92; d = d * 0.88;   // the block prints on the glass
+                    break;
+                case Kind.Rail:                                            // XLINE / RAY: bus bar
+                    b.Box(w, d, topZ * 0.3, new Point3d(cx, cy, topZ * 0.72), LPart, CopTop);
+                    b.Cyl(d * 0.32, topZ * 0.6, new Point3d(cx - w * 0.36, cy, 0), LPart, Terminal);   // standoffs
+                    b.Cyl(d * 0.32, topZ * 0.6, new Point3d(cx + w * 0.36, cy, 0), LPart, Terminal);
+                    b.Cyl(d * 0.15, 0.2, new Point3d(cx - w * 0.36, cy, topZ * 0.87), LPart, Pin1);    // bolt heads
+                    b.Cyl(d * 0.15, 0.2, new Point3d(cx + w * 0.36, cy, topZ * 0.87), LPart, Pin1);
+                    topZ = topZ * 0.87;                      // the bar's top face, between the bolt heads
+                    break;
                 default:
                     b.Box(w, d, topZ, new Point3d(cx, cy, topZ / 2), layer, col);
                     break;
