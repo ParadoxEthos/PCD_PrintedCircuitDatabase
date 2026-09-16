@@ -83,3 +83,12 @@ restarting AutoCAD. Both ship together in the bundle.
 `HANDOFF_2026-09-06.md` is the working engineering log: the measured routing facts, the verification
 loop (`tools/netdump.lsp` + `tools/cross_check.py`, or a full scan tool scan + `tools/route_audit.py`),
 and the operating constraints.
+
+## License
+
+PCD is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE).
+Copyright © 2026 ParadoxEthos.
+
+The GPL requires anyone who redistributes PCD or a derivative work to preserve this copyright notice
+and to state the changes they made, so authorship of the original work is retained in every copy and
+fork. Every source file carries the notice header.
