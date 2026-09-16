@@ -1,0 +1,85 @@
+# PCD — Printed Circuit Database
+
+A managed-ObjectARX AutoCAD 2027 add-in that reads the active drawing's database — symbol
+tables, records, and model-space entities — and renders it as a 3D printed circuit board in a
+clear area beside the source geometry. The board *is* the database: ownership relationships are
+drawn as copper traces, reference relationships as thin hairlines.
+
+- **Ownership** (entity → `*Model_Space`, record → its table, table → the DATABASE) routes as copper.
+- **References** (an entity's layer, linetype, text style, block, dimension style, or registered
+  application) route as thinner hairlines, subordinate to the ownership copper.
+- Each symbol table gets its own IC; each record a smaller chip; each model-space entity a package
+  whose family is chosen from its DXF type. `*Model_Space` — the container that owns every drawable
+  entity — is rendered as a second large die (the "GPU").
+
+PCD **never saves** the drawing and touches only the `PCD-*` layer namespace. Re-running the `PCD`
+command replaces the previous render rather than stacking a new one.
+
+## Requirements
+
+- AutoCAD 2027 (internal series R26.0)
+- .NET 10 SDK (the host runtime; target framework `net10.0-windows`)
+- Windows x64
+
+The projects reference the managed ObjectARX assemblies from
+`C:\Program Files\Autodesk\AutoCAD 2027\` (`acmgd`, `acdbmgd`, `accoremgd`, `acdbmgdbrep`). Adjust
+the `HintPath` entries in `core/PCD.Core.csproj` and `loader/PCD.Loader.csproj` if AutoCAD is
+installed elsewhere.
+
+## Build and install
+
+```powershell
+# Build the plugin bundle (both DLLs into bundle\PCD.bundle\Contents\)
+powershell -ExecutionPolicy Bypass -File tools\build_bundle.ps1
+
+# Install into AutoCAD's per-user trusted plugin location, then restart AutoCAD
+powershell -ExecutionPolicy Bypass -File tools\install_bundle.ps1        # self-contained copy
+powershell -ExecutionPolicy Bypass -File tools\install_bundle.ps1 -Dev   # junction to the repo build
+powershell -ExecutionPolicy Bypass -File tools\install_bundle.ps1 -Uninstall
+```
+
+The bundle installs to `%APPDATA%\Autodesk\ApplicationPlugins\PCD.bundle\`. AutoCAD trusts that
+location (no SECURELOAD prompt) and demand-loads the add-in on the first `PCD*` command — no
+`NETLOAD`.
+
+## Commands
+
+| Command | Action |
+|---|---|
+| `PCD` | Read the active drawing's database and render the board beside the source geometry. Idempotent. |
+| `PCDVIEW` | Frame the board: SW isometric, zoom extents, realistic visual style. |
+| `PCDPING` | Report the loaded add-in version and the resolved `PCD.Core.dll` path. |
+| `PCDTEMPLATE` | Build a coverage drawing that exercises every package and relationship class PCD renders (see below). Never saves. |
+| `PCDTEMPLATERESET` | Erase **all** model-space entities (confirmation required) so `PCDTEMPLATE` can build from a clean slate. |
+
+### Coverage template
+
+`PCDTEMPLATE` constructs the minimum drawing that lights up every feature PCD renders — one of every
+entity type it maps to a package, spread across five layers, four linetypes, two text styles, and the
+other symbol tables, so all seven relationship classes appear on the board. It is the reference
+input for verifying a render. Entity counts per family are chosen so consecutive handles cover each
+`(abs handle) % N` package sub-variety. Build a template, run `PCD`, then `SAVEAS` to keep it.
+
+## Diagnostics
+
+`PCD` and `PCDTEMPLATE` write small diagnostic files (routing statistics, a coverage report). By
+default these go to `%TEMP%\PCD\`. Override the directory with the `PCD_OUT` environment variable.
+
+Setting `PCD_DSN` (to any value) additionally exports a Specctra DSN of the routing problem for study
+in an external autorouter; it is off by default so normal renders do not build it.
+
+## Architecture
+
+The geometry and routing live in `PCD.Core.dll`; `PCD.Loader.dll` is a thin entry assembly that
+hot-loads Core into a collectible `AssemblyLoadContext` per command, so Core can be rebuilt without
+restarting AutoCAD. Both ship together in the bundle.
+
+- `src/Demo.cs` — database read, part/edge model, placement, the grid router, and rendering.
+- `src/Pcb.cs` — geometry primitives (extrusions, traces, text, materials).
+- `src/Template.cs` — the coverage-template builder.
+- `src/Loader.cs` — command entry points and the hot-load mechanism.
+- `src/Paths.cs` — diagnostic output-path resolution.
+
+`HANDOFF_2026-09-06.md` is the working engineering log: the measured routing facts, the verification
+loop (`tools/netdump.lsp` + `tools/cross_check.py`, or a full scan tool scan + `tools/route_audit.py`),
+and the operating constraints.
