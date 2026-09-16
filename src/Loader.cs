@@ -5,6 +5,7 @@ using System.Runtime.Loader;
 using Autodesk.AutoCAD.Runtime;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
 using AcAp = Autodesk.AutoCAD.ApplicationServices.Application;
 
 [assembly: CommandClass(typeof(PCD.Loader))]
@@ -87,7 +88,39 @@ namespace PCD
 
         /// <summary>Erase every model-space entity so PCDTEMPLATE can rebuild from a clean slate.</summary>
         [CommandMethod("PCDTEMPLATERESET")]
-        public void TemplateReset() { InvokeCore("PCD.Template", "Reset"); }
+        public void TemplateReset()
+        {
+            Document doc = AcAp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+
+            // Count first so the prompt names an exact number. This erases ALL model-space entities,
+            // not just PCD output, so it is guarded by an explicit confirmation defaulting to No.
+            int n = 0;
+            using (doc.LockDocument())
+            using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+            {
+                var bt = (BlockTable)tr.GetObject(doc.Database.BlockTableId, OpenMode.ForRead);
+                var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
+                foreach (ObjectId _ in ms) n++;
+                tr.Commit();
+            }
+            if (n == 0) { ed.WriteMessage("\nModel space is already empty. Nothing to reset.\n"); return; }
+
+            var opts = new PromptKeywordOptions(
+                "\nPCDTEMPLATERESET will ERASE all " + n + " model-space entities in " + doc.Name + ". Continue?");
+            opts.Keywords.Add("Yes");
+            opts.Keywords.Add("No");
+            opts.Keywords.Default = "No";
+            opts.AllowNone = true;   // Enter accepts the default (No)
+            PromptResult r = ed.GetKeywords(opts);
+            if (r.Status != PromptStatus.OK || r.StringResult != "Yes")
+            {
+                ed.WriteMessage("\nPCDTEMPLATERESET cancelled.\n");
+                return;
+            }
+            InvokeCore("PCD.Template", "Reset");
+        }
 
         /// <summary>Hot-load PCD.Core and invoke one static (Database, Transaction) entry point.
         /// The template commands live in THIS assembly rather than a second shim because the loader

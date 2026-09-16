@@ -223,6 +223,7 @@ namespace PCD
 
         public static void Build(Database db, Transaction tr)
         {
+            ClearPcd(db, tr);   // idempotent: replace a prior render, never stack a duplicate on top of it
             var b = new Pcb(db, tr);
             Setup(b);
             var parts = new List<Part>();
@@ -235,6 +236,27 @@ namespace PCD
             SizeByPins(parts, edges);   // a chip grows to hold one pad per connection (a 113-pin hub IS a big chip)
             Layout(parts);
             BuildFromGraph(b, parts, edges);
+        }
+
+        /// <summary>Erase a previous PCD render so re-running the command replaces it rather than
+        /// stacking a duplicate. Touches ONLY model-space entities whose layer name begins "PCD-"
+        /// (the namespace PCD owns); user geometry is never affected. The LISP run wrapper used to
+        /// perform this erase externally, so the command was not idempotent on its own -- a bundled
+        /// PCD with no wrapper would double every entity on the second run. Ids are collected first,
+        /// then erased, so the model-space iterator is not mutated mid-traversal.</summary>
+        private static void ClearPcd(Database db, Transaction tr)
+        {
+            var bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
+            var kill = new List<ObjectId>();
+            foreach (ObjectId id in ms)
+            {
+                var e = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                if (e != null && e.Layer != null && e.Layer.StartsWith("PCD-", StringComparison.OrdinalIgnoreCase))
+                    kill.Add(id);
+            }
+            foreach (ObjectId id in kill)
+                ((Entity)tr.GetObject(id, OpenMode.ForWrite)).Erase();
         }
 
         // ======================================================================
