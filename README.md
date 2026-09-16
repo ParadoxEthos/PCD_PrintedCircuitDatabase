@@ -26,6 +26,34 @@ The projects reference the managed ObjectARX assemblies from
 the `HintPath` entries in `core/PCD.Core.csproj` and `loader/PCD.Loader.csproj` if AutoCAD is
 installed elsewhere.
 
+## Compatibility
+
+As built, PCD runs on **AutoCAD 2027 only**. This is a hard constraint of two binding requirements
+measured from the build, not a conservative default:
+
+| PCD requires | Value | AutoCAD 2027 provides |
+|---|---|---|
+| .NET runtime | .NET 10 (`net10.0-windows`) | .NET 10 (`acdbmgd.dll` targets `.NETCoreApp,Version=v10.0`) |
+| ObjectARX managed API | AssemblyVersion `26.0.0.0` | AssemblyVersion `26.0.0.0` (FileVersion `26.0.60`) |
+
+The manifest also gates loading to `SeriesMin/Max = R26.0`.
+
+- **AutoCAD 2025 / 2026 cannot load PCD.** They host .NET 8, and the CLR refuses to load a .NET 10
+  assembly on a .NET 8 host — the framework mismatch blocks it before any API binding is even
+  attempted. Their ObjectARX AssemblyVersion (25.x) is a second, independent mismatch.
+- **AutoCAD 2028+ is untested.** It would load only if that release keeps *both* .NET 10 and
+  ObjectARX AssemblyVersion `26.0.0.0`. Autodesk normally bumps the managed AssemblyVersion each
+  major release, which breaks the binding, so forward compatibility cannot be assumed — verify per
+  release.
+
+**To verify on any AutoCAD:** install the bundle, run `PCDPING` (loads the assembly and reports the
+resolved `PCD.Core.dll` path — it errors immediately if the runtime or binding does not resolve),
+then `PCD`.
+
+Supporting more versions means multi-targeting the projects (per-version `.NET` TFM and ObjectARX
+`HintPath`s) and shipping one `<ComponentEntry>` per version in the manifest — each compiled against
+that release's ObjectARX reference assemblies.
+
 ## Build and install
 
 ```powershell
