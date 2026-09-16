@@ -19,3 +19,6 @@ Desktop.ini
 
 # ---- misc ----
 *.log
+
+# ---- plugin bundle build output (DLLs regenerate; manifest is tracked) ----
+/bundle/PCD.bundle/Contents/

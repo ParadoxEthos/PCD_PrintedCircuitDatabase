@@ -10,6 +10,9 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AssemblyName>PCD.Loader</AssemblyName>
     <RootNamespace>PCD</RootNamespace>
+    <Version>0.52.0</Version>
+    <AssemblyVersion>0.52.0.0</AssemblyVersion>
+    <FileVersion>0.52.0.0</FileVersion>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <!-- Stable shim: NETLOADed ONCE, hot-loads PCD.Core.dll (sibling file) each call. -->

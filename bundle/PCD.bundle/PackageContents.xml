@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AutoCAD Application Plugin manifest for PCD (Printed Circuit Database).
+
+  Placed at <bundle>/PackageContents.xml. When the PCD.bundle folder is under
+  %APPDATA%\Autodesk\ApplicationPlugins\, AutoCAD reads this file at startup, trusts the module
+  (no SECURELOAD prompt), and demand-loads PCD.Loader.dll the first time any listed command runs.
+  No NETLOAD, no manual load.
+
+  ModuleName points at PCD.Loader.dll. That assembly hot-loads its sibling PCD.Core.dll into a
+  collectible AssemblyLoadContext per command; both ship together under Contents/, so the sibling
+  is always present. LoadOnCommandInvocation defers the load until a PCD command is first typed.
+
+  RuntimeRequirements pins AutoCAD R26.0 (the internal series the installed AutoCAD 2027 reports:
+  COM Version 26.0s, registry key R26.0). PCD.Core references the 2027 managed ObjectARX assemblies
+  and targets net10.0-windows, so it is genuinely single-version until those references are widened.
+-->
+<ApplicationPackage
+    SchemaVersion="1.0"
+    AutodeskProduct="AutoCAD"
+    ProductType="Application"
+    Name="PCD"
+    AppVersion="0.52.0"
+    Description="Printed Circuit Database — renders the active drawing's database as a 3D printed circuit board"
+    Author="ParadoxEthos">
+
+  <CompanyDetails
+      Name="ParadoxEthos"
+      Url="https://github.com/ParadoxEthos/PCD_PrintedCircuitDatabase" />
+
+  <Components Description="PCD runtime">
+    <RuntimeRequirements
+        OS="Win64"
+        Platform="AutoCAD*"
+        SeriesMin="R26.0"
+        SeriesMax="R26.0" />
+
+    <ComponentEntry
+        AppName="PCD"
+        ModuleName="./Contents/PCD.Loader.dll"
+        AppDescription="Renders the active drawing's database as a 3D PCB"
+        LoadOnAutoCADStartup="False"
+        LoadOnCommandInvocation="True">
+      <Commands GroupName="PCD">
+        <Command Global="PCD"               Local="PCD" />
+        <Command Global="PCDVIEW"           Local="PCDVIEW" />
+        <Command Global="PCDPING"           Local="PCDPING" />
+        <Command Global="PCDTEMPLATE"       Local="PCDTEMPLATE" />
+        <Command Global="PCDTEMPLATERESET"  Local="PCDTEMPLATERESET" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>
