@@ -91,6 +91,16 @@ other symbol tables, so all seven relationship classes appear on the board. It i
 input for verifying a render. Entity counts per family are chosen so consecutive handles cover each
 `(abs handle) % N` package sub-variety. Build a template, run `PCD`, then `SAVEAS` to keep it.
 
+## Performance
+
+Building the board is compute-intensive and runs on AutoCAD's main thread, so **AutoCAD will appear
+unresponsive while `PCD` runs — it is busy, not frozen.** Give it time: a small drawing renders in
+seconds, a large one can take several minutes. The cost scales with the number of source entities
+and relationships — PCD reads up to a few hundred parts and then generates the traces, vias, pads,
+and the per-part data "rain", which is commonly tens of thousands of objects (a modest template
+render produces ~20,000). Let it finish; the command returns and prints a summary when done.
+Re-running `PCD` replaces the previous board rather than adding to it.
+
 ## Diagnostics
 
 `PCD` and `PCDTEMPLATE` write small diagnostic files (routing statistics, a coverage report). By
