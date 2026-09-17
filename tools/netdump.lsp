@@ -1,9 +1,9 @@
-;; NETDUMP -- dump every PCD copper trace so routing can be checked geometrically WITHOUT a full
-;; scan tool scan. Read-only: it selects and measures, it never modifies the drawing.
+;; NETDUMP -- dump every PCD copper trace so routing can be checked geometrically WITHOUT a full external
+;; drawing scan. Read-only: it selects and measures, it never modifies the drawing.
 ;;
 ;; PCD draws copper as LWPOLYLINEs on PCD-NET with a constant width (group 43) and an Elevation
 ;; (group 38), so the copper layer of every segment is readable straight off the entity. That makes
-;; a crossing test cheap: seconds, versus a multi-minute ~25 MB scan tool scan.
+;; a crossing test cheap: seconds, versus a slow full-drawing scan.
 ;;
 ;; Output: one line per trace,
 ;;     P <elevation> <width> <trueColor|-1> x,y x,y ...

@@ -108,9 +108,9 @@ restarting AutoCAD. Both ship together in the bundle.
 - `src/Loader.cs` — command entry points and the hot-load mechanism.
 - `src/Paths.cs` — diagnostic output-path resolution.
 
-`HANDOFF_2026-09-06.md` is the working engineering log: the measured routing facts, the verification
-loop (`tools/netdump.lsp` + `tools/cross_check.py`, or a full scan tool scan + `tools/route_audit.py`),
-and the operating constraints.
+Routing can be verified geometrically: `tools/netdump.lsp` dumps every copper trace (with its
+elevation and width) from the active drawing, and `tools/cross_check.py` reports same-layer
+crossings from that dump. See each tool's header for usage.
 
 ## License
 
