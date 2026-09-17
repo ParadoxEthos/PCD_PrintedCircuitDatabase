@@ -21,7 +21,7 @@
     ProductType="Application"
     Name="PCD"
     AppVersion="0.52.0"
-    Description="Printed Circuit Database — renders the active drawing's database as a 3D printed circuit board"
+    Description="A fun way to visualize an AutoCAD drawing's database — PCD renders its structure as a 3D scene styled like a circuit board: ownership becomes copper traces, references become hairlines"
     Author="ParadoxEthos">
 
   <CompanyDetails
@@ -38,7 +38,7 @@
     <ComponentEntry
         AppName="PCD"
         ModuleName="./Contents/PCD.Loader.dll"
-        AppDescription="Renders the active drawing's database as a 3D PCB"
+        AppDescription="A fun 3D visualization of a drawing's database, styled like a circuit board"
         LoadOnAutoCADStartup="False"
         LoadOnCommandInvocation="True">
       <Commands GroupName="PCD">

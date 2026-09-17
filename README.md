@@ -1,9 +1,12 @@
 # PCD — Printed Circuit Database
 
-A managed-ObjectARX AutoCAD 2027 add-in that reads the active drawing's database — symbol
-tables, records, and model-space entities — and renders it as a 3D printed circuit board in a
-clear area beside the source geometry. The board *is* the database: ownership relationships are
-drawn as copper traces, reference relationships as thin hairlines.
+**The drawing is the board.**
+
+PCD is a managed-ObjectARX AutoCAD 2027 add-in that reads the active drawing's database — symbol
+tables, records, and model-space entities — and renders its structure as a 3D scene styled like a
+circuit board, in a clear area beside the source geometry. It's a fun, visual way to see what's
+inside a drawing: ownership relationships become copper traces, reference relationships become thin
+hairlines. It's a representation of the database, not a real or manufacturable PCB.
 
 - **Ownership** (entity → `*Model_Space`, record → its table, table → the DATABASE) routes as copper.
 - **References** (an entity's layer, linetype, text style, block, dimension style, or registered
