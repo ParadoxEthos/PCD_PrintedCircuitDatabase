@@ -2,6 +2,8 @@
 
 **The drawing is the board.**
 
+![An AutoCAD drawing's database rendered as a circuit-board-style 3D scene](images/pcd-board.png)
+
 PCD is a managed-ObjectARX AutoCAD 2027 add-in that reads the active drawing's database — symbol
 tables, records, and model-space entities — and renders its structure as a 3D scene styled like a
 circuit board, in a clear area beside the source geometry. It's a fun, visual way to see what's
@@ -25,6 +27,10 @@ hairlines. It's a representation of the database, not a real or manufacturable P
   of that part's numeric values: the literal bits of its numbers.
 - **Red katakana plume** — a taller, denser plume of katakana instead of binary marks an **ACIS 3D
   solid** (a genuine 3D object in the source drawing).
+
+![The GPU die (`*Model_Space`) among packages, with copper traces, green binary plumes, and a red katakana plume marking an ACIS solid](images/pcd-detail.png)
+
+![The CPU (the DATABASE die) surrounded by symbol-table chips, each showing its entget pod](images/pcd-tables.png)
 
 PCD **never saves** the drawing and touches only the `PCD-*` layer namespace (`PCD-NET` copper,
 `PCD-PLUME` binary, `PCD-KATA` katakana, and so on), so you can freeze or delete its output without
