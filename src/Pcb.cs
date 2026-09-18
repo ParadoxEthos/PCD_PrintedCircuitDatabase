@@ -346,5 +346,39 @@ namespace PCD
             Place(t, layer, color);
             return t;
         }
+
+        /// <summary>
+        /// Wrap one line of text around a vertical cylinder — axis at (<paramref name="cx"/>,
+        /// <paramref name="cy"/>), radius <paramref name="r"/>, baseline at height <paramref name="z"/>.
+        /// The line is centred on angle <paramref name="thetaMid"/> (radians, CCW from +X) and reads
+        /// left-to-right along the CCW tangent, each glyph standing upright (+Z) and facing radially
+        /// outward. One DBText per glyph, since a single DBText cannot follow a curve.
+        /// <paramref name="charW"/> is the advance width per glyph in drawing units (arc length),
+        /// so the angular step is charW / r.
+        /// </summary>
+        public void TextArc(string s, double cx, double cy, double r, double z, double thetaMid,
+                            double height, double charW, string layer, AcColor color, ObjectId styleId)
+        {
+            if (string.IsNullOrEmpty(s) || r <= 1e-6) return;
+            double dTheta = charW / r;
+            double theta0 = thetaMid - (s.Length - 1) * dTheta / 2.0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char ch = s[i];
+                if (ch == ' ') continue;                       // spaces just advance the angle
+                double th = theta0 + i * dTheta;
+                double px = cx + r * Math.Cos(th), py = cy + r * Math.Sin(th);
+                var adv = new Vector3d(-Math.Sin(th), Math.Cos(th), 0.0);   // CCW tangent (glyph advance)
+                var up = Vector3d.ZAxis;                                    // glyph height, straight up
+                var nrm = new Vector3d(Math.Cos(th), Math.Sin(th), 0.0);   // radially outward (glyph normal)
+                var t = new DBText { TextString = ch.ToString(), Height = height, Position = Point3d.Origin };
+                if (!styleId.IsNull) t.TextStyleId = styleId;
+                // Map the glyph's flat frame (X advance, Y up, Z out) onto the cylinder-surface frame.
+                t.TransformBy(Matrix3d.AlignCoordinateSystem(
+                    Point3d.Origin, Vector3d.XAxis, Vector3d.YAxis, Vector3d.ZAxis,
+                    new Point3d(px, py, z), adv, up, nrm));
+                Place(t, layer, color);
+            }
+        }
     }
 }

@@ -2057,6 +2057,7 @@ namespace PCD
             double w = part.Vw, d = part.Vd, topZ = Math.Max(0.6, part.Vz), cx = part.Cx, cy = part.Cy;
             int v = part.Variant;
             double faceH = 0;   // >0 : this package's top is obstructed -> data prints on its front side
+            double wrapR = 0, wrapZ0 = 0, wrapZ1 = 0;   // wrapR>0 : round body -> data wraps around the side
             bool isChip = part.Kind == Kind.Die || part.Kind == Kind.Table || part.Kind == Kind.Nod
                        || part.Kind == Kind.Record || part.Kind == Kind.Gpu;
             string layer = isChip ? LIc : LPart;
@@ -2123,6 +2124,7 @@ namespace PCD
                         b.Cyl(cr, topZ, new Point3d(cx, cy, 0), layer, col);
                         b.Torus(cr, 0.3, new Point3d(cx, cy, topZ), LPart, CapRim);
                         if (v == 1) b.Box(0.55, cr * 0.9, topZ, new Point3d(cx - cr + 0.3, cy, topZ / 2), LPart, Silk);
+                        wrapR = cr; wrapZ0 = topZ * 0.12; wrapZ1 = topZ * 0.88;   // data wraps the can wall
                         w = d = cr * 1.32; }
                     break;
                 case Kind.Resistor:
@@ -2152,6 +2154,7 @@ namespace PCD
                     b.Cyl(lr, topZ * 0.26, new Point3d(cx, cy, 0), LPart, Terminal);
                     b.Cyl(lr * 0.8, topZ * 0.5, new Point3d(cx, cy, topZ * 0.26), layer, lens);
                     b.Sphere(lr * 0.8, new Point3d(cx, cy, topZ * 0.76), layer, lens);
+                    wrapR = lr * 0.8; wrapZ0 = topZ * 0.28; wrapZ1 = topZ * 0.74;   // data wraps the lens barrel, clear of the dome
                     topZ = topZ * 0.76 + lr * 0.8; w = d = lr * 2;
                     break;
                 }
@@ -2161,6 +2164,7 @@ namespace PCD
                     b.Cone(tr, tr * 0.8, topZ, new Point3d(cx, cy, 0.3), layer, col);
                     for (int i = -1; i <= 1; i++)
                         b.Cyl(0.26, 1.4, new Point3d(cx + i * tr * 0.5, cy - tr * 0.55, -0.4), LPart, Terminal);
+                    wrapR = tr * 0.86; wrapZ0 = 0.5; wrapZ1 = 0.3 + topZ * 0.62;   // data wraps the can wall
                     w = d = tr * 2;
                     topZ = topZ + 0.3;                                     // cone TOP (base sits at 0.3): text lands on the can, not inside it
                     break;
@@ -2210,6 +2214,7 @@ namespace PCD
                     b.Cyl(pr, topZ * 0.6, new Point3d(cx, cy, 0), layer, col);
                     b.Cyl(pr * 0.34, topZ * 0.55, new Point3d(cx, cy, topZ * 0.6), LPart, Terminal);
                     b.Box(pr * 0.5, 0.22, topZ * 0.2, new Point3d(cx, cy, topZ * 0.6 + topZ * 0.45), LPart, Pin1);  // slotted top
+                    wrapR = pr; wrapZ0 = topZ * 0.08; wrapZ1 = topZ * 0.55;   // data wraps the round body, below the shaft
                     w = d = pr * 2;
                     topZ = topZ * 1.15 + 0.05;                             // above the shaft tip: text never inside the shaft
                     break;
@@ -2336,7 +2341,8 @@ namespace PCD
             }
             // part data prints ON the hardware body itself (auto-fit to the part), entities
             // included; the binary/katakana rain still rises from the part.
-            if (faceH > 0) PodFace(b, part.Title, part.Rows, cx, cy, w * 0.9, d, faceH, topZ, part.Idx);
+            if (wrapR > 0) PodWrap(b, part.Title, part.Rows, cx, cy, wrapR, wrapZ0, wrapZ1, topZ, part.Kind == Kind.Opaque, part.Idx);
+            else if (faceH > 0) PodFace(b, part.Title, part.Rows, cx, cy, w * 0.9, d, faceH, topZ, part.Idx);
             else Pod(b, part.Title, part.Rows, cx, cy, w * 0.9, d * 0.86, topZ, part.Kind == Kind.Opaque, part.Idx);
         }
 
@@ -2841,6 +2847,36 @@ namespace PCD
                             BitH * 1.05, LKata, KataRed, FaceY, _kata);   // spaced vertically (KataStep)
                 }
             }
+        }
+
+        /// <summary>Pod for a part with a ROUND body (LED, can, pot, TO-can): the entget block wraps
+        /// around the cylindrical side, like printing on a real component's can, instead of skewing
+        /// flat over a domed or curved top. Lines stack down the wall from z1 to z0, each centred on
+        /// the front (-Y) so the readable run faces the default view. The rain still rises from the top.</summary>
+        private static void PodWrap(Pcb b, string title, Row[] rows, double cx, double cy,
+                                    double r, double z0, double z1, double ztopRain, bool opaque, int seed)
+        {
+            var lines = new string[rows.Length];
+            for (int i = 0; i < rows.Length; i++)
+                lines[i] = rows[i].Code.ToString().PadRight(3) + rows[i].Name.PadRight(11) + rows[i].Disp;
+            int lmax = title.Length;
+            foreach (var t in lines) if (t.Length > lmax) lmax = t.Length;
+            int n = lines.Length + 1;
+            double band = Math.Max(0.5, z1 - z0);
+            double gap = band / n;
+            // fit the longest line into ~82% of the circumference; also cap by the per-line vertical slot.
+            double hArc = (2.0 * Math.PI * r * 0.82) / (Math.Max(1, lmax) * CharW);
+            double h = Math.Min(gap / Pitch, hArc);
+            if (h < 0.10) h = 0.10;                          // floor: a very long line then runs past 82% (front still reads)
+            const double thetaFront = -Math.PI / 2.0;        // centre readable text toward -Y (the front face)
+            double rr = r + 0.04, zt = z1 - gap;             // sit just proud of the wall; first line below the top rim
+            b.TextArc(title, cx, cy, rr, zt, thetaFront, h * 1.08, CharW * h * 1.08, LSilk, Silk, _mono);
+            for (int i = 0; i < lines.Length; i++)
+                b.TextArc(lines[i], cx, cy, rr, zt - gap * (i + 1), thetaFront, h, CharW * h, LData, Data, _mono);
+            if (opaque) { RainKata(b, cx, cy, ztopRain, seed); return; }
+            var cols = new List<string>();
+            foreach (Row rr2 in rows) foreach (double val in rr2.Reals) cols.Add(Bits64(val));
+            Rain(b, cx, cy, ztopRain, cols);
         }
 
         /// <summary>Pod for a part whose TOP is obstructed (pin header): the entget block prints on the
