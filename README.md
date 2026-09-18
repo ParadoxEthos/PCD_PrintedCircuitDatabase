@@ -8,15 +8,28 @@ circuit board, in a clear area beside the source geometry. It's a fun, visual wa
 inside a drawing: ownership relationships become copper traces, reference relationships become thin
 hairlines. It's a representation of the database, not a real or manufacturable PCB.
 
-- **Ownership** (entity → `*Model_Space`, record → its table, table → the DATABASE) routes as copper.
-- **References** (an entity's layer, linetype, text style, block, dimension style, or registered
-  application) route as thinner hairlines, subordinate to the ownership copper.
-- Each symbol table gets its own IC; each record a smaller chip; each model-space entity a package
-  whose family is chosen from its DXF type. `*Model_Space` — the container that owns every drawable
-  entity — is rendered as a second large die (the "GPU").
+## What you're seeing
 
-PCD **never saves** the drawing and touches only the `PCD-*` layer namespace. Re-running the `PCD`
-command replaces the previous render rather than stacking a new one.
+- **Chips** — each symbol table is an IC (sized by how many records it holds); each record is a
+  smaller chip on that table. The **DATABASE die** is the root object every table hangs off, and
+  `*Model_Space` — the container that owns every drawable entity — is rendered as a second large die.
+- **Packages** — each model-space entity becomes a piece of hardware whose family is chosen from its
+  DXF type (resistor, capacitor, IC, connector, and so on).
+- **Copper traces** — **ownership** relationships (entity → `*Model_Space`, record → its table,
+  table → the DATABASE), class-colored and dominant.
+- **Hairlines** — **reference** relationships (an entity's layer, linetype, text style, block,
+  dimension style, or registered application), thinner and dimmer so ownership stays prominent.
+- **Pods** — the block of text on each part is its real `entget` data: the actual DXF group codes
+  and values for that entity or record.
+- **Green binary plume** — the column of 0/1s rising from a part is the raw IEEE-754 64-bit encoding
+  of that part's numeric values: the literal bits of its numbers.
+- **Red katakana plume** — a taller, denser plume of katakana instead of binary marks an **ACIS 3D
+  solid** (a genuine 3D object in the source drawing).
+
+PCD **never saves** the drawing and touches only the `PCD-*` layer namespace (`PCD-NET` copper,
+`PCD-PLUME` binary, `PCD-KATA` katakana, and so on), so you can freeze or delete its output without
+affecting your drawing. Re-running the `PCD` command replaces the previous render rather than
+stacking a new one.
 
 ## Requirements
 
